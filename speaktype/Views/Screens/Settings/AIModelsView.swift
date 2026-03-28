@@ -42,27 +42,6 @@ struct AIModelsView: View {
             // Refresh model download status when view appears
             Task {
                 await downloadService.refreshDownloadedModels()
-
-                // Auto-fallback: If selected model isn't downloaded, switch to first available
-                if !selectedModel.isEmpty {
-                    let isSelectedModelDownloaded =
-                        downloadService.downloadProgress[selectedModel] ?? 0.0 >= 1.0
-
-                    if !isSelectedModelDownloaded {
-                        // Find first downloaded model
-                        if let firstDownloaded = downloadService.downloadProgress.first(where: {
-                            $0.value >= 1.0
-                        })?.key {
-                            print(
-                                "⚠️ Selected model '\(selectedModel)' not found. Auto-switching to '\(firstDownloaded)'"
-                            )
-                            selectedModel = firstDownloaded
-                        } else {
-                            print("⚠️ No models downloaded. Please download a model to use the app.")
-                            selectedModel = ""  // Clear invalid selection
-                        }
-                    }
-                }
             }
         }
     }

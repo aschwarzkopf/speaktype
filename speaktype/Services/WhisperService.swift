@@ -63,6 +63,7 @@ class WhisperService {
         case fileNotFound
         case alreadyLoading
         case loadingTimeout
+        case invalidModelSelection(String)
 
         var errorDescription: String? {
             switch self {
@@ -71,6 +72,11 @@ class WhisperService {
             case .alreadyLoading: return "Model loading already in progress"
             case .loadingTimeout:
                 return "Model loading timed out — your Mac may not have enough RAM for this model"
+            case .invalidModelSelection(let variant):
+                if variant.isEmpty {
+                    return "No AI model selected. Download or choose a model in AI Models first."
+                }
+                return "Selected AI model '\(variant)' is no longer available. Choose a downloaded model in AI Models."
             }
         }
     }
@@ -85,6 +91,10 @@ class WhisperService {
 
     // Dynamic model loading with optimized WhisperKitConfig
     func loadModel(variant: String) async throws {
+        guard AIModel.availableModels.contains(where: { $0.variant == variant }) else {
+            throw TranscriptionError.invalidModelSelection(variant)
+        }
+
         // Already loaded this exact model
         if isInitialized && variant == currentModelVariant && pipe != nil {
             print("✅ Model \(variant) already loaded, skipping")

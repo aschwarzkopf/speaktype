@@ -15,7 +15,7 @@ struct DashboardView: View {
     @EnvironmentObject var trialManager: TrialManager
     @EnvironmentObject var licenseManager: LicenseManager
 
-    @AppStorage("selectedModelVariant") private var selectedModel: String = "openai_whisper-base"
+    @AppStorage("selectedModelVariant") private var selectedModel: String = ""
     @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
     @State private var showFileImporter = false
     @State private var isTranscribing = false

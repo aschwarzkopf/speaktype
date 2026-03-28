@@ -10,6 +10,7 @@ class ModelDownloadService: ObservableObject {
     @Published var isDownloading: [String: Bool] = [:]
     
     private var activeTasks: [String: Task<Void, Never>] = [:] // Track running download tasks
+    private let selectedModelKey = "selectedModelVariant"
     
     private init() {
         // Force a custom cache directory to avoid "Multiple models found" conflicts
@@ -18,7 +19,6 @@ class ModelDownloadService: ObservableObject {
         // Check for already-downloaded models on launch
         Task { @MainActor in
             await refreshDownloadedModels()
-            // Don't auto-select - let user explicitly pick a model which will load it
         }
     }
     
@@ -99,15 +99,19 @@ class ModelDownloadService: ObservableObject {
             }
         }
         
+        let orderedDownloadedVariants = orderedModelVariants(from: foundModels)
+
         await MainActor.run {
             // Clear all previous progress
             self.downloadProgress.removeAll()
             
             // Only mark models that actually exist
-            for variant in foundModels {
+            for variant in orderedDownloadedVariants {
                 self.downloadProgress[variant] = 1.0
                 print("✅ Marked as downloaded: \(variant)")
             }
+
+            self.synchronizeSelectedModelSelection(with: orderedDownloadedVariants)
             
             if foundModels.isEmpty {
                 print("❌ No models found - all will show as 'Download' buttons")
@@ -158,6 +162,7 @@ class ModelDownloadService: ObservableObject {
                 DispatchQueue.main.async {
                     self.isDownloading[variant] = false
                     self.downloadProgress[variant] = 1.0
+                    self.synchronizeSelectedModelSelection(preferredVariant: variant)
                     self.activeTasks[variant] = nil // Cleanup task
                 }
             } catch {
@@ -203,6 +208,7 @@ class ModelDownloadService: ObservableObject {
                              self.isDownloading[variant] = false
                              self.downloadProgress[variant] = 1.0
                              self.downloadError[variant] = nil
+                             self.synchronizeSelectedModelSelection(preferredVariant: variant)
                              self.activeTasks[variant] = nil
                          }
                      } catch {
@@ -297,6 +303,7 @@ class ModelDownloadService: ObservableObject {
             await MainActor.run {
                 self.downloadProgress[variant] = 0.0
                 self.isDownloading[variant] = false
+                self.synchronizeSelectedModelSelection()
             }
             return "Deleted \(deletedCount) items"
         } else {
@@ -381,5 +388,43 @@ class ModelDownloadService: ObservableObject {
         formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+
+    private func orderedModelVariants(from variants: Set<String>) -> [String] {
+        AIModel.availableModels.map(\.variant).filter { variants.contains($0) }
+    }
+
+    private func synchronizeSelectedModelSelection(with downloadedVariants: [String]? = nil, preferredVariant: String? = nil) {
+        let resolvedDownloadedVariants: [String]
+        if let downloadedVariants {
+            resolvedDownloadedVariants = downloadedVariants
+        } else {
+            let downloadedSet = Set(
+                downloadProgress.compactMap { variant, progress in
+                    progress >= 1.0 ? variant : nil
+                }
+            )
+            resolvedDownloadedVariants = orderedModelVariants(from: downloadedSet)
+        }
+
+        let currentSelection = UserDefaults.standard.string(forKey: selectedModelKey) ?? ""
+        let preferredSelection = preferredVariant.flatMap { variant in
+            resolvedDownloadedVariants.contains(variant) ? variant : nil
+        }
+
+        let nextSelection = preferredSelection
+            ?? (resolvedDownloadedVariants.contains(currentSelection) ? currentSelection : resolvedDownloadedVariants.first)
+
+        if let nextSelection {
+            if currentSelection != nextSelection {
+                print("🔁 Syncing selected model to \(nextSelection)")
+            }
+            UserDefaults.standard.set(nextSelection, forKey: selectedModelKey)
+        } else {
+            if !currentSelection.isEmpty {
+                print("⚠️ Clearing selected model because no downloaded models are available")
+            }
+            UserDefaults.standard.removeObject(forKey: selectedModelKey)
+        }
     }
 }
