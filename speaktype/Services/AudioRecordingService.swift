@@ -141,8 +141,19 @@ class AudioRecordingService: NSObject, ObservableObject {
             self.availableDevices = discoverySession.devices.filter { device in
                 !device.localizedName.localizedCaseInsensitiveContains("Microsoft Teams")
             }
-            if self.selectedDeviceId == nil, let first = self.availableDevices.first {
-                self.selectedDeviceId = first.uniqueID
+            if let selectedDeviceId = self.selectedDeviceId,
+                self.availableDevices.contains(where: { $0.uniqueID == selectedDeviceId })
+            {
+                return
+            }
+
+            if let first = self.availableDevices.first {
+                if self.selectedDeviceId != first.uniqueID {
+                    print("🎤 Falling back to available input device: \(first.localizedName)")
+                    self.selectedDeviceId = first.uniqueID
+                }
+            } else {
+                self.selectedDeviceId = nil
             }
         }
     }
