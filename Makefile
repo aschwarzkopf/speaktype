@@ -1,6 +1,11 @@
 # Makefile for SpeakType
 
-.PHONY: help build clean clean-dev test lint format run run-dev run-release setup logs logs-live logs-errors logs-export install uninstall reinstall
+# Stable self-signed identity for local dev — keeps TCC grants (Accessibility,
+# Microphone) alive across rebuilds. Create it with `make setup-signing`.
+SIGN_ID ?= SpeakType Dev
+SIGN_FLAGS := CODE_SIGN_IDENTITY="$(SIGN_ID)" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" ENABLE_HARDENED_RUNTIME=NO
+
+.PHONY: help build clean clean-dev test lint format run run-dev run-release setup setup-signing logs logs-live logs-errors logs-export install uninstall reinstall
 
 # Default target
 help:
@@ -56,6 +61,10 @@ setup:
 	@which swiftlint > /dev/null || echo "⚠️  SwiftLint not installed. Install with: brew install swiftlint"
 	@echo "✅ Setup complete!"
 
+# Create the stable self-signed identity used for local dev builds
+setup-signing:
+	@./scripts/setup-dev-signing.sh
+
 # Stamp BuildInfo.swift with the current compile timestamp
 stamp-build-info:
 	@TIMESTAMP=$$(date '+%b %d %H:%M:%S'); \
@@ -65,12 +74,12 @@ stamp-build-info:
 # Build the project
 build: stamp-build-info
 	@echo "Building SpeakType..."
-	xcodebuild -scheme speaktype -configuration Debug build
+	xcodebuild -scheme speaktype -configuration Debug build $(SIGN_FLAGS)
 
 # Build for release
 build-release:
 	@echo "Building SpeakType (Release)..."
-	@xcodebuild -scheme speaktype -configuration Release build 2>&1 | grep -E "(error:|BUILD)" || true
+	@xcodebuild -scheme speaktype -configuration Release build $(SIGN_FLAGS) 2>&1 | grep -E "(error:|BUILD)" || true
 
 # Run release build
 run-release:
@@ -80,7 +89,7 @@ run-release:
 # Run the application
 run: stamp-build-info
 	@echo "Running SpeakType..."
-	@xcodebuild -scheme speaktype -configuration Debug build 2>&1 | grep -E "(error:|BUILD)" || true
+	@xcodebuild -scheme speaktype -configuration Debug build $(SIGN_FLAGS) 2>&1 | grep -E "(error:|BUILD)" || true
 	@open $$(find ~/Library/Developer/Xcode/DerivedData/speaktype-*/Build/Products/Debug -name "speaktype.app" -type d | head -1)
 
 # Run the current checkout as a separate dev app identity
