@@ -765,11 +765,21 @@ struct KeyEventHandlerView: NSViewRepresentable {
         }
 
         override func keyDown(with event: NSEvent) {
+            // Silently consume our own synthetic events. `suppressEmojiPicker`
+            // in AppDelegate posts an F19 keyDown with the 'SPEK' sentinel
+            // stamped on its CGEvent; without this guard it falls through
+            // `super.keyDown` and produces NSBeep since nothing in the
+            // responder chain handles F19. (More frequent on rapid Fn
+            // presses because first-responder setup wins the race.)
+            if event.cgEvent?.getIntegerValueField(.eventSourceUserData)
+                == AppDelegate.syntheticEventSentinel {
+                return
+            }
             if event.keyCode == 53 {  // Escape key
                 onEscape?()
-            } else {
-                super.keyDown(with: event)
+                return
             }
+            super.keyDown(with: event)
         }
     }
 }

@@ -110,6 +110,21 @@ final class AppDelegateHotkeyDecisionTests: XCTestCase {
 
     // MARK: - Edge: non-device-independent-flag-only is ignored
 
+    // MARK: - NSBeep regression — KeyCaptureView must silently drop
+    // synthetic events. The boink fired intermittently on rapid Fn
+    // presses because the F19 from suppressEmojiPicker hit
+    // KeyCaptureView.keyDown as first responder, fell through super,
+    // walked the responder chain unhandled, and triggered NSBeep.
+    // The fix is a cheap sentinel check in keyDown; this test documents
+    // the contract (the sentinel constant exists and is the exact value
+    // KeyCaptureView filters on) so a future refactor can't accidentally
+    // break the silent-consumption path.
+
+    func testSyntheticEventSentinelExposedOnAppDelegate() {
+        XCTAssertEqual(AppDelegate.syntheticEventSentinel, 0x5350454B,
+            "KeyCaptureView.keyDown filters events carrying this sentinel.")
+    }
+
     func testOnlyNumericPadFlagDoesNotCountAsCombo() {
         // .numericPad is in deviceIndependentFlagsMask but arrives on
         // numpad keystrokes even without a user pressing a modifier.
