@@ -416,6 +416,8 @@ struct AudioSettingsTab: View {
                         icon: "mic", title: "Input Device", subtitle: "Select your microphone")
 
                     VStack(spacing: 12) {
+                        SystemDefaultDeviceRow()
+
                         if audioRecorder.availableDevices.isEmpty {
                             Text("No input devices found")
                                 .font(Typography.bodyMedium)

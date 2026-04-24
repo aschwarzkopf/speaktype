@@ -59,6 +59,8 @@ struct AudioInputView: View {
                         .foregroundStyle(Color.textSecondary)
                     
                     VStack(spacing: 12) {
+                        SystemDefaultDeviceRow()
+
                         if audioRecorder.availableDevices.isEmpty {
                             Text("No input devices found.")
                                 .foregroundStyle(.gray)
@@ -67,7 +69,7 @@ struct AudioInputView: View {
                             ForEach(audioRecorder.availableDevices, id: \.uniqueID) { device in
                                 DeviceRow(
                                     name: device.localizedName,
-                                    isActive: audioRecorder.selectedDeviceId == device.uniqueID, // Simple check
+                                    isActive: audioRecorder.selectedDeviceId == device.uniqueID,
                                     isSelected: audioRecorder.selectedDeviceId == device.uniqueID
                                 )
                                 .onTapGesture {
@@ -94,19 +96,31 @@ struct DeviceRow: View {
     let name: String
     let isActive: Bool
     let isSelected: Bool
-    
+    /// Optional secondary line. Used by the "System Default" row to
+    /// show the currently-resolved device name (e.g.
+    /// "Currently: MacBook Pro Microphone") without inventing a new
+    /// component.
+    var subtitle: String? = nil
+
     var body: some View {
         HStack {
             Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(isSelected ? Color.accentPrimary : Color.textMuted)
                 .font(.title3)
-            
-            Text(name)
-                .font(Typography.bodyMedium)
-                .foregroundStyle(Color.textPrimary)
-            
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(Typography.bodyMedium)
+                    .foregroundStyle(Color.textPrimary)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(Typography.labelSmall)
+                        .foregroundStyle(Color.textMuted)
+                }
+            }
+
             Spacer()
-            
+
             if isActive {
                 HStack(spacing: 4) {
                     Image(systemName: "waveform")
@@ -128,5 +142,38 @@ struct DeviceRow: View {
                 .stroke(isSelected ? Color.bgSelected : Color.border, lineWidth: 1)
         )
         .cardShadow()
+    }
+}
+
+/// Pinned-to-top picker row that tracks macOS's default input device.
+/// Selecting it sets `selectedDeviceId` to the sentinel so the service
+/// re-resolves on every default-device change (headphone plug/unplug,
+/// user toggling in Sound Settings, etc.). Subtitle updates live via
+/// SystemDefaultInputWatcher.
+struct SystemDefaultDeviceRow: View {
+    @ObservedObject private var audioRecorder = AudioRecordingService.shared
+    @ObservedObject private var watcher = SystemDefaultInputWatcher.shared
+
+    private var isSelected: Bool {
+        audioRecorder.selectedDeviceId == AudioRecordingService.systemDefaultSentinel
+    }
+
+    private var subtitle: String {
+        if let name = watcher.currentDefaultDeviceName, !name.isEmpty {
+            return "Currently: \(name)"
+        }
+        return "Currently: (none detected)"
+    }
+
+    var body: some View {
+        DeviceRow(
+            name: "System Default",
+            isActive: isSelected,
+            isSelected: isSelected,
+            subtitle: subtitle
+        )
+        .onTapGesture {
+            audioRecorder.selectedDeviceId = AudioRecordingService.systemDefaultSentinel
+        }
     }
 }

@@ -6,6 +6,13 @@ import Foundation
 class AudioRecordingService: NSObject, ObservableObject {
     static let shared = AudioRecordingService()  // Shared instance for settings/dashboard sync
 
+    /// Sentinel value stored in `selectedDeviceId` to mean "follow
+    /// whatever macOS currently reports as the default input device."
+    /// AudioRecordingService resolves this to the real UID via
+    /// SystemDefaultInputWatcher at setup time and re-resolves on every
+    /// default-device change.
+    static let systemDefaultSentinel = "system-default"
+
     // Chunk publisher: emits the URL of each completed ~4-second audio chunk while recording
     let chunkPublisher = PassthroughSubject<URL, Never>()
     private static let chunkDuration: TimeInterval = 4.0
@@ -19,6 +26,12 @@ class AudioRecordingService: NSObject, ObservableObject {
             setupSession()
         }
     }
+
+    /// Set when the system default changes while a recording is in
+    /// flight; processed at the next `startRecording()` so we don't
+    /// glitch the audio mid-capture.
+    private var pendingDeviceSwap: Bool = false
+    private var defaultInputCancellable: AnyCancellable?
 
     private var captureSession: AVCaptureSession?
     private var audioOutput: AVCaptureAudioDataOutput?
@@ -118,9 +131,11 @@ class AudioRecordingService: NSObject, ObservableObject {
     override init() {
         super.init()
         fetchAvailableDevices()
-        if let first = availableDevices.first {
-            selectedDeviceId = first.uniqueID
-        }
+
+        // Default to "follow system default" on fresh launch. Users can
+        // override by picking a specific device in the settings picker;
+        // the choice applies for the session.
+        selectedDeviceId = Self.systemDefaultSentinel
 
         // Listen for device changes (plug/unplug)
         NotificationCenter.default.addObserver(
@@ -136,6 +151,24 @@ class AudioRecordingService: NSObject, ObservableObject {
             name: AVCaptureDevice.wasDisconnectedNotification,
             object: nil
         )
+
+        // Follow system-default-input changes. When the user swaps the
+        // default in Sound Settings (or plugs in a headset and macOS
+        // auto-switches), re-run setupSession so we track it. Swaps are
+        // deferred if a recording is in flight to avoid audible glitch.
+        defaultInputCancellable = SystemDefaultInputWatcher.shared.$currentDefaultUID
+            .dropFirst()  // skip the initial replay on subscribe
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self,
+                    self.selectedDeviceId == Self.systemDefaultSentinel
+                else { return }
+                if self.isRecording {
+                    self.pendingDeviceSwap = true
+                } else {
+                    self.setupSession()
+                }
+            }
     }
 
     @objc private func handleDeviceChange(_ notification: Notification) {
@@ -151,38 +184,115 @@ class AudioRecordingService: NSObject, ObservableObject {
         )
         DispatchQueue.main.async {
             self.availableDevices = discoverySession.devices.filter { device in
-                !device.localizedName.localizedCaseInsensitiveContains("Microsoft Teams")
+                // Filter out virtual / wrapper devices the user shouldn't
+                // see in the picker:
+                //   - "Microsoft Teams" — created by Teams' audio hijack
+                //   - Anything containing "aggregate" — macOS's
+                //     auto-generated "CA default device aggregate" proxy
+                //     plus any user- or app-created aggregates (users
+                //     who need those can still route via the "System
+                //     Default" row).
+                let name = device.localizedName
+                if name.localizedCaseInsensitiveContains("Microsoft Teams") {
+                    return false
+                }
+                if name.localizedCaseInsensitiveContains("aggregate") {
+                    return false
+                }
+                return true
             }
-            if self.selectedDeviceId == nil, let first = self.availableDevices.first {
-                self.selectedDeviceId = first.uniqueID
+            if self.selectedDeviceId == nil {
+                self.selectedDeviceId = Self.systemDefaultSentinel
             }
         }
     }
 
+    /// Resolve the currently-selected device (sentinel or specific UID)
+    /// to an `AVCaptureDevice`.
+    ///
+    /// For the sentinel we use SystemDefaultInputWatcher's UID, which
+    /// has already been unwrapped through any aggregate-device wrapper
+    /// (including macOS 26's auto-generated "CA default device
+    /// aggregate" proxy). This is critical: `AVCaptureDevice.default(
+    /// for: .audio)` returns the aggregate directly, and samples from
+    /// the aggregate pass through to the writer but break our RMS-
+    /// based level meter because amplitudes arrive pre-normalized.
+    /// Going via the watcher gives us the actual physical microphone.
+    ///
+    /// If the watcher has no default (no mic attached), we fall back
+    /// to AVCaptureDevice.default(for: .audio) as a last resort rather
+    /// than returning nil — capture-through-aggregate is better than
+    /// no capture at all.
+    private func resolvedDevice() -> AVCaptureDevice? {
+        guard let selectedDeviceId else { return nil }
+        if selectedDeviceId == Self.systemDefaultSentinel {
+            if let uid = SystemDefaultInputWatcher.shared.currentDefaultUID,
+                let device = AVCaptureDevice(uniqueID: uid)
+            {
+                return device
+            }
+            return AVCaptureDevice.default(for: .audio)
+        }
+        return AVCaptureDevice(uniqueID: selectedDeviceId)
+    }
+
     func setupSession() {
         captureSession?.stopRunning()
-        captureSession = AVCaptureSession()
+        // Clear up-front so a failure leaves the service in a
+        // retry-friendly state: the next call to startRecording() will
+        // see `captureSession == nil` and rebuild. Previously we
+        // assigned a fresh empty AVCaptureSession and then bailed on
+        // device-resolution failure, leaving the service stuck with a
+        // non-nil but input-less session and silent recordings forever.
+        captureSession = nil
 
-        guard let deviceId = selectedDeviceId,
-            let device = AVCaptureDevice(uniqueID: deviceId),
+        guard let device = resolvedDevice(),
             let input = try? AVCaptureDeviceInput(device: device)
         else {
-            print("Failed to find or add device with ID: \(selectedDeviceId ?? "nil")")
+            print("⚠️ setupSession: no device resolved for selectedDeviceId=\(selectedDeviceId ?? "nil")")
             return
         }
 
-        if captureSession?.canAddInput(input) == true {
-            captureSession?.addInput(input)
+        let session = AVCaptureSession()
+
+        if session.canAddInput(input) {
+            session.addInput(input)
+        } else {
+            print("⚠️ setupSession: session refused input for device \(device.localizedName)")
+            return
         }
 
-        audioOutput = AVCaptureAudioDataOutput()
-        if captureSession?.canAddOutput(audioOutput!) == true {
-            captureSession?.addOutput(audioOutput!)
-            audioOutput?.setSampleBufferDelegate(self, queue: audioQueue)
+        let output = AVCaptureAudioDataOutput()
+        // Force a canonical Float32 mono format on the output. Without
+        // this, AVCaptureAudioDataOutput passes through whatever the
+        // device natively delivers — many USB external mics use Int24,
+        // which our level-meter code path doesn't handle (it only has
+        // branches for Float32, Int16, and Int32). The result was a
+        // silent meter despite working transcription. macOS will insert
+        // a converter as needed; the recording WAV is still produced
+        // correctly because the writer reads from the converted stream.
+        output.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 16000.0,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        if session.canAddOutput(output) {
+            session.addOutput(output)
+            output.setSampleBufferDelegate(self, queue: audioQueue)
+        } else {
+            print("⚠️ setupSession: session refused audio output")
+            return
         }
 
-        // Don't start session here - only start when recording begins
-        // This prevents continuous CPU usage when idle
+        captureSession = session
+        audioOutput = output
+
+        // Don't start session here - only start when recording begins.
+        // This prevents continuous CPU usage when idle.
     }
 
     /// Pre-warm the capture session so first recording starts instantly
@@ -203,7 +313,14 @@ class AudioRecordingService: NSObject, ObservableObject {
         requestPermission()
 
         guard !isRecording else { return }
-        if captureSession == nil { setupSession() }
+
+        // Apply any deferred system-default swap that arrived while a
+        // previous recording was in flight. Always rebuild if the
+        // capture session doesn't exist yet.
+        if captureSession == nil || pendingDeviceSwap {
+            pendingDeviceSwap = false
+            setupSession()
+        }
 
         shouldDiscardCurrentRecordingOutput = false
         isRecording = true
