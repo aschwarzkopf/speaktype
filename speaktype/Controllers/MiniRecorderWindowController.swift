@@ -176,7 +176,17 @@ class MiniRecorderWindowController: NSObject {
             }
 
             await MainActor.run {
-                ClipboardService.shared.paste()
+                if PasteEligibility.canAutoPaste() {
+                    ClipboardService.shared.paste()
+                } else {
+                    // No editable element has focus — posting Cmd+V
+                    // would produce NSBeep via noResponder(for: paste:).
+                    // Skip the paste; text is on the clipboard so the
+                    // user can still paste manually when ready.
+                    // (A user-facing HUD lives in git history; add back
+                    // when the UI design work happens.)
+                    print("ℹ️ No editable focus — skipping auto-paste, text on clipboard")
+                }
             }
         }
     }
