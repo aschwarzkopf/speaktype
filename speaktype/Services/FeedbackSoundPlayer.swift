@@ -16,12 +16,14 @@ final class FeedbackSoundPlayer {
     private var startSound: PreparedSound?
     private var stopSound: PreparedSound?
 
-    /// Tone parameters — tuned for a Wispr-flow-ish "soft blip" feel.
-    /// `start` is slightly higher than `stop` to convey the direction of
-    /// the action (rising = begin, falling = commit).
-    static let startFrequencyHz: Float = 880     // A5
+    /// Tone parameters — warm solfeggio-tuned "soft blip."
+    /// Start = 528 Hz (the "love" frequency, ~C5 +19 cents).
+    /// Stop = 396 Hz (the "liberation" frequency, ~G4 −13 cents,
+    /// a perfect fourth below start). The downward interval conveys
+    /// the direction of the action (begin → commit).
+    static let startFrequencyHz: Float = 528     // "Love" — solfeggio
     static let startDurationMs: Int = 100
-    static let stopFrequencyHz: Float = 660      // E5 — a perfect 4th below
+    static let stopFrequencyHz: Float = 396      // "Liberation" — perfect 4th below
     static let stopDurationMs: Int = 120
     static let amplitude: Float = 0.15
 

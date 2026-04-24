@@ -9,6 +9,17 @@ import SwiftUI
 final class KeyableMiniRecorderPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    // No keyDown override. The synthetic-F19 sentinel filter lives in
+    // AppDelegate.handleHotkeyEventTap at the CGEventTap level, which
+    // drops sentinel-tagged events from the stream before any NSEvent is
+    // ever created for them. That is the architecturally correct point —
+    // the CGEvent's user-data field is reliable at the tap (unlike
+    // NSEvent.cgEvent, which returns a reconstructed event whose user-
+    // data can read back as zero on keyDown). Overriding keyDown here
+    // additionally starved NSPanel lifecycle handling (Cmd-W, cancel
+    // operation, responder-chain forwarding), which caused a separate
+    // "panel disappears" regression.
 }
 
 @MainActor
@@ -151,12 +162,71 @@ class MiniRecorderWindowController: NSObject {
                 _ = await MainActor.run {
                     app.activate()
                 }
+                // Wait until the target app is actually frontmost before
+                // posting Cmd+V. Fixed sleeps are race-prone — if Cmd+V
+                // arrives while our panel is still resigning key (or
+                // during the brief limbo where no window is key), the
+                // synthetic keyDown lands at NSResponder.noResponder(for:)
+                // which beeps by design. Observing activation is
+                // deterministic where a fixed sleep is statistical.
+                await Self.waitForApplicationActivation(
+                    bundleID: app.bundleIdentifier,
+                    timeout: 1.0
+                )
             }
-
-            try? await Task.sleep(nanoseconds: 500_000_000)
 
             await MainActor.run {
                 ClipboardService.shared.paste()
+            }
+        }
+    }
+
+    /// Wait for the application with `bundleID` to become frontmost,
+    /// returning as soon as it does (or after `timeout` seconds,
+    /// whichever is first). Observes
+    /// `NSWorkspace.didActivateApplicationNotification`; no polling.
+    private static func waitForApplicationActivation(
+        bundleID: String?,
+        timeout: TimeInterval
+    ) async {
+        // Already there — nothing to wait for.
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID {
+            return
+        }
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let workspace = NSWorkspace.shared
+            let center = workspace.notificationCenter
+            let lock = NSLock()
+            var resumed = false
+            var observer: NSObjectProtocol?
+
+            let resumeOnce: () -> Void = {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                if let observer = observer {
+                    center.removeObserver(observer)
+                }
+                continuation.resume()
+            }
+
+            observer = center.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { notification in
+                if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication,
+                    app.bundleIdentifier == bundleID
+                {
+                    resumeOnce()
+                }
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+                resumeOnce()
             }
         }
     }

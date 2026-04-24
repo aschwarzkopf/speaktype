@@ -128,7 +128,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupSuppressingHotkeyEventTap() {
         guard hotkeyEventTap == nil else { return }
 
-        let eventMask = (1 << CGEventType.flagsChanged.rawValue)
+        // Also watch keyDown so we can drop our own synthetic F19 events
+        // (from suppressEmojiPicker) at the tap level — before they can
+        // become NSEvents and trigger NSBeep or false-positive combo-
+        // cancels in handleModifierComboEvent. The CGEvent user-data
+        // field is reliable here; the NSEvent.cgEvent wrapper is not.
+        let eventMask =
+            (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.keyDown.rawValue)
         let callback: CGEventTapCallBack = { _, type, event, refcon in
             guard let refcon else {
                 return Unmanaged.passUnretained(event)
@@ -168,10 +175,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return Unmanaged.passUnretained(event)
         }
 
-        // Let our own synthetic events pass through untouched — we must
-        // never re-interpret an event we posted ourselves.
+        // Drop our own synthetic events from the stream entirely. This
+        // prevents NSBeep (from unhandled F19 in the responder chain)
+        // AND prevents false positives in handleModifierComboEvent
+        // (which can't reliably read the sentinel from NSEvent.cgEvent).
+        // Returning nil deletes the event per CGEventTapCallBack docs.
         if event.getIntegerValueField(.eventSourceUserData) == Self.syntheticEventSentinel {
-            return Unmanaged.passUnretained(event)
+            return nil
         }
 
         guard type == .flagsChanged else {
