@@ -15,6 +15,10 @@ struct MiniRecorderView: View {
     @AppStorage("recordingMode") private var recordingMode: Int = 0
     @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
     @AppStorage("recentTranscriptionLanguages") private var recentLanguagesString: String = ""
+    @AppStorage("cleanupMode") private var cleanupModeRaw: String = CleanupMode.off.rawValue
+    private var cleanupMode: CleanupMode {
+        CleanupMode(rawValue: cleanupModeRaw) ?? .off
+    }
     private let quickLanguageDefaults = ["en", "es", "fr", "de", "hi", "pt", "ja", "zh"]
 
     private var recentLanguageCodes: [String] {
@@ -565,8 +569,16 @@ struct MiniRecorderView: View {
             if !viewModel.cancelCommit {
                 await MainActor.run { viewModel.statusMessage = "Transcribing..." }
             }
-            let text = try await whisperService.transcribe(audioFile: url, language: transcriptionLanguage)
-            debugLog("Transcription result: \(text.prefix(50))...")
+            let rawText = try await whisperService.transcribe(audioFile: url, language: transcriptionLanguage)
+            debugLog("Transcription result: \(rawText.prefix(50))...")
+
+            // Optional cleanup pass — Phase 1 routes all modes to the
+            // pass-through IdentityPolisher, so this is a no-op until
+            // Phase 2 / Phase 3 plug in the real implementations. The
+            // try?-fallback guarantees cleanup failures never block the
+            // user's paste flow: worst case, the raw transcript is used.
+            let polisher = PolisherFactory.make(mode: cleanupMode)
+            let text = (try? await polisher.polish(rawText)) ?? rawText
 
             guard !text.isEmpty else {
                 debugLog("Empty text, cancelling")
