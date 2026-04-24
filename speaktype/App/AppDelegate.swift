@@ -15,6 +15,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var globalKeyDownMonitor: Any?
     private var localKeyDownMonitor: Any?
 
+    /// Sentinel stamped into every synthetic CGEvent we post ourselves
+    /// (currently just the F19 pair from `suppressEmojiPicker`). macOS 26
+    /// composes live modifier state onto `.hidSystemState`-sourced events,
+    /// so a synthesized F19 posted while Fn is held comes back carrying
+    /// `.function` and would otherwise trip `handleModifierComboEvent`'s
+    /// combo-cancel guard. Filtering on this sentinel is robust to user
+    /// remapping and independent of which keyCode we synthesize.
+    static let syntheticEventSentinel: Int64 = 0x5350454B  // 'SPEK'
+
+    // MARK: - Pure hotkey decision (testable, no AppKit dependency)
+
+    enum HotkeyDecision: Equatable {
+        case ignore
+        case cancel
+    }
+
+    static func decideComboEvent(
+        keyCode: UInt16,
+        flags: NSEvent.ModifierFlags,
+        hotkeyCode: UInt16,
+        isHotkeyPressed: Bool,
+        recordingMode: Int,
+        isSynthetic: Bool
+    ) -> HotkeyDecision {
+        if isSynthetic { return .ignore }
+        guard isHotkeyPressed else { return .ignore }
+        guard recordingMode == 0 else { return .ignore }
+        guard !flags.intersection(.deviceIndependentFlagsMask).isEmpty else { return .ignore }
+        guard keyCode != hotkeyCode else { return .ignore }
+        return .cancel
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         miniRecorderController = MiniRecorderWindowController()
 
@@ -38,22 +70,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Emoji Picker Suppression
 
     private func suppressEmojiPicker() {
-        // A robust way to suppress the emoji picker is to post a harmless keydown/keyup
-        // with the F19 key (a non-modifier key), which immediately breaks the Globe key's double-tap
-        // or press-and-release listener without causing a spurious flagsChanged event.
+        // Post a harmless F19 keydown/keyup to break the Globe key's double-tap
+        // or press-and-release detection in the system emoji picker.
+        //
+        // Two protections against the macOS 26 modifier-composition behavior:
+        // 1. `.privateState` source — does not merge live modifier state at
+        //    post time, so the synthesized event doesn't inherit `.function`
+        //    from a physically-held Fn.
+        // 2. `eventSourceUserData` sentinel — tags the event so our own
+        //    handlers can unambiguously identify and ignore it, even if the
+        //    user has remapped F19 or a third-party remapper is in the loop.
         let dummyKeyCode: CGKeyCode = 0x50  // F19 (80)
-        let eventSource = CGEventSource(stateID: .hidSystemState)
+        guard let source = CGEventSource(stateID: .privateState) else { return }
 
-        if let keyDown = CGEvent(
-            keyboardEventSource: eventSource, virtualKey: dummyKeyCode, keyDown: true)
-        {
-            keyDown.post(tap: .cghidEventTap)
-        }
-
-        if let keyUp = CGEvent(
-            keyboardEventSource: eventSource, virtualKey: dummyKeyCode, keyDown: false)
-        {
-            keyUp.post(tap: .cghidEventTap)
+        for keyDown in [true, false] {
+            guard let event = CGEvent(
+                keyboardEventSource: source, virtualKey: dummyKeyCode, keyDown: keyDown
+            ) else { continue }
+            event.flags = []  // explicit: no modifier composition
+            event.setIntegerValueField(
+                .eventSourceUserData, value: Self.syntheticEventSentinel
+            )
+            event.post(tap: .cghidEventTap)
         }
     }
 
@@ -130,6 +168,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return Unmanaged.passUnretained(event)
         }
 
+        // Let our own synthetic events pass through untouched — we must
+        // never re-interpret an event we posted ourselves.
+        if event.getIntegerValueField(.eventSourceUserData) == Self.syntheticEventSentinel {
+            return Unmanaged.passUnretained(event)
+        }
+
         guard type == .flagsChanged else {
             return Unmanaged.passUnretained(event)
         }
@@ -193,13 +237,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleModifierComboEvent(_ event: NSEvent) {
-        guard isHotkeyPressed else { return }
-        guard UserDefaults.standard.integer(forKey: "recordingMode") == 0 else { return }
-        guard !event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty else { return }
-        guard event.keyCode != getSelectedHotkey().keyCode else { return }
-
-        isHotkeyPressed = false
-        miniRecorderController?.cancelRecording()
+        let isSynthetic = event.cgEvent?.getIntegerValueField(.eventSourceUserData)
+            == Self.syntheticEventSentinel
+        let decision = Self.decideComboEvent(
+            keyCode: event.keyCode,
+            flags: event.modifierFlags,
+            hotkeyCode: getSelectedHotkey().keyCode,
+            isHotkeyPressed: isHotkeyPressed,
+            recordingMode: UserDefaults.standard.integer(forKey: "recordingMode"),
+            isSynthetic: isSynthetic
+        )
+        switch decision {
+        case .cancel:
+            isHotkeyPressed = false
+            miniRecorderController?.cancelRecording()
+        case .ignore:
+            return
+        }
     }
 
     private func isDuplicateHotkeyEvent(isPressed: Bool) -> Bool {
