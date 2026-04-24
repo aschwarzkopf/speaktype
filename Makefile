@@ -71,13 +71,16 @@ stamp-build-info:
 	echo "// Auto-generated — do not edit manually." > speaktype/Constants/BuildInfo.swift; \
 	echo "let buildTimestamp = \"$$TIMESTAMP\"" >> speaktype/Constants/BuildInfo.swift
 
-# Build the project
-build: stamp-build-info
+# Build the project (debug builds leave BuildInfo.swift at its committed
+# default of "development" to avoid dirtying the tracked file on every
+# rebuild — only release builds stamp a real timestamp).
+build:
 	@echo "Building SpeakType..."
 	xcodebuild -scheme speaktype -configuration Debug build $(SIGN_FLAGS)
 
-# Build for release
-build-release:
+# Build for release — stamps BuildInfo.swift with the real timestamp so
+# the About sidebar shows an accurate build date for shipped binaries.
+build-release: stamp-build-info
 	@echo "Building SpeakType (Release)..."
 	@xcodebuild -scheme speaktype -configuration Release build $(SIGN_FLAGS) 2>&1 | grep -E "(error:|BUILD)" || true
 
@@ -86,14 +89,14 @@ run-release:
 	@echo "Running SpeakType (Release)..."
 	@open $$(find ~/Library/Developer/Xcode/DerivedData/speaktype-*/Build/Products/Release -name "speaktype.app" -type d | head -1)
 
-# Run the application
-run: stamp-build-info
+# Run the application (debug — no build-info stamping)
+run:
 	@echo "Running SpeakType..."
 	@xcodebuild -scheme speaktype -configuration Debug build $(SIGN_FLAGS) 2>&1 | grep -E "(error:|BUILD)" || true
 	@open $$(find ~/Library/Developer/Xcode/DerivedData/speaktype-*/Build/Products/Debug -name "speaktype.app" -type d | head -1)
 
 # Run the current checkout as a separate dev app identity
-run-dev: stamp-build-info
+run-dev:
 	@./scripts/run-dev.sh
 
 # Run all tests
