@@ -2,38 +2,62 @@ import Foundation
 import AVFoundation
 import Combine
 
+enum AudioPlayerError: LocalizedError, Identifiable {
+    case loadFailed(underlying: Error)
+
+    var id: String { localizedDescription }
+
+    var errorDescription: String? {
+        switch self {
+        case .loadFailed(let err):
+            return "Couldn't load audio file: \(err.localizedDescription)"
+        }
+    }
+}
+
 /// Service for playing back audio recordings
+@MainActor
 class AudioPlayerService: NSObject, ObservableObject, AVAudioPlayerDelegate {
     static let shared = AudioPlayerService()
-    
+
     @Published var isPlaying = false
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
     @Published var currentAudioURL: URL?
-    
+    /// Last error produced by loadAudio. Views can observe this via
+    /// `.alert(item:)`; setting it back to nil dismisses the alert.
+    @Published var lastError: AudioPlayerError?
+
     private var audioPlayer: AVAudioPlayer?
     private var timer: Timer?
-    
+
     private override init() {
         super.init()
     }
-    
-    /// Load audio file and prepare for playback
-    func loadAudio(from url: URL) {
+
+    /// Load audio file and prepare for playback.
+    /// Throws AudioPlayerError on failure and publishes it via `lastError`
+    /// so passive SwiftUI bindings can react.
+    func loadAudio(from url: URL) async throws {
+        stop()
+
         do {
-            // Reset previous state
-            stop()
-            
-            audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.delegate = self
-            audioPlayer?.prepareToPlay()
-            
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.delegate = self
+            player.prepareToPlay()
+
+            audioPlayer = player
             currentAudioURL = url
-            duration = audioPlayer?.duration ?? 0
+            duration = player.duration
             currentTime = 0
-            
+            lastError = nil
         } catch {
-            print("Error loading audio: \(error)")
+            let wrapped = AudioPlayerError.loadFailed(underlying: error)
+            lastError = wrapped
+            audioPlayer = nil
+            currentAudioURL = nil
+            duration = 0
+            throw wrapped
         }
     }
     

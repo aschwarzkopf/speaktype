@@ -64,8 +64,20 @@ class UpdateService: ObservableObject {
             }
         } catch {
             print("Failed to check for updates: \(error)")
-            await MainActor.run { self.isCheckingForUpdates = false }
+            // Clear stale state: a prior successful check may have set
+            // availableUpdate, and leaving it in place after a failed
+            // refresh would show an outdated update banner.
+            await MainActor.run {
+                self.isCheckingForUpdates = false
+                self.availableUpdate = nil
+            }
         }
+    }
+
+    /// Manually discard any pending available-update announcement. Used
+    /// by UI (e.g. dismiss button) and by the error path above.
+    func clearAvailableUpdate() {
+        availableUpdate = nil
     }
 
     /// Check if enough time has passed since last check (24 hours)

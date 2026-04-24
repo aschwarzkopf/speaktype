@@ -85,7 +85,7 @@ struct HistoryView: View {
                                             expandedItemId = item.id
                                             if let audioURL = item.audioFileURL,
                                                FileManager.default.fileExists(atPath: audioURL.path) {
-                                                audioPlayer.loadAudio(from: audioURL)
+                                                Task { try? await audioPlayer.loadAudio(from: audioURL) }
                                             } else {
                                                 audioPlayer.reset()
                                             }

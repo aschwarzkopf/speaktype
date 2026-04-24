@@ -72,8 +72,14 @@ class HistoryService: ObservableObject {
     }
     
     func deleteItem(at offsets: IndexSet, deleteAudioFile: Bool = true) {
-        let itemsToDelete = offsets.compactMap { items.indices.contains($0) ? items[$0] : nil }
-        items.remove(atOffsets: offsets)
+        // Filter offsets to those still in range — SwiftUI can hand us
+        // stale indices during rapid delete operations, and
+        // `remove(atOffsets:)` crashes on out-of-bounds entries.
+        let validOffsets = IndexSet(offsets.filter { items.indices.contains($0) })
+        guard !validOffsets.isEmpty else { return }
+
+        let itemsToDelete = validOffsets.map { items[$0] }
+        items.remove(atOffsets: validOffsets)
         if deleteAudioFile {
             itemsToDelete.forEach(removeAudioFileIfNeeded(for:))
         }

@@ -4,16 +4,12 @@ import CoreMedia
 import SwiftUI
 
 struct MiniRecorderView: View {
+    @ObservedObject var viewModel: MiniRecorderViewModel
     @ObservedObject private var audioRecorder = AudioRecordingService.shared
     private var whisperService: WhisperService { WhisperService.shared }
-    @State private var isListening = false
 
-    @State private var isProcessing = false
-    @State private var statusMessage = "Transcribing..."
-    @State private var isWarmingUp = false
+    // View-only state (not session-lifecycle; kept local):
     @State private var showAccessibilityWarning = false
-    var onCommit: ((String) -> Void)?
-    var onCancel: (() -> Void)?
 
     @AppStorage("selectedModelVariant") private var selectedModel: String = ""
     @AppStorage("recordingMode") private var recordingMode: Int = 0
@@ -70,21 +66,21 @@ struct MiniRecorderView: View {
         AXIsProcessTrusted()
     }
 
-    // MARK: - State for Escape key cancellation
-    @State private var cancelCommit = false
-    @State private var globalEscapeMonitor: Any?
-    @State private var localEscapeMonitor: Any?
+    // Escape is captured via KeyEventHandlerView (NSView keyDown) now that
+    // the hosting panel is a KeyableMiniRecorderPanel that can become key.
 
     // MARK: - State for Animation
     @State private var phase: CGFloat = 0
 
     // Calculate bar height based on audio level and position
     private func barHeight(for index: Int) -> CGFloat {
-        let level = CGFloat(audioRecorder.audioLevel)
+        // Defensive clamp — processAudioLevel normalizes to [0,1], but
+        // any future bug upstream that produces a value outside that
+        // range would push sqrt() to NaN/oversize and break the visual.
+        let level = min(1.0, max(0.0, CGFloat(audioRecorder.audioLevel)))
         let baseHeight: CGFloat = 4
         let maxHeight: CGFloat = 28
 
-        // Create wave pattern that responds to audio
         let waveOffset = sin(CGFloat(index) * 0.5 + phase) * 0.3
         let audioMultiplier = sqrt(level) * (0.8 + waveOffset)
 
@@ -92,17 +88,15 @@ struct MiniRecorderView: View {
         return max(baseHeight, min(height, maxHeight))
     }
 
-    // Default Init for Preview
-    init(onCommit: ((String) -> Void)? = nil, onCancel: (() -> Void)? = nil) {
-        self.onCommit = onCommit
-        self.onCancel = onCancel
+    init(viewModel: MiniRecorderViewModel) {
+        self.viewModel = viewModel
     }
 
     var body: some View {
         ZStack {
             backgroundView
 
-            if isWarmingUp || whisperService.isLoading {
+            if viewModel.isWarmingUp || whisperService.isLoading {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
@@ -112,8 +106,8 @@ struct MiniRecorderView: View {
                         .foregroundColor(.white.opacity(0.9))
                 }
                 .transition(.opacity)
-            } else if isProcessing {
-                Text(statusMessage)
+            } else if viewModel.isProcessing {
+                Text(viewModel.statusMessage)
                     .font(Typography.labelMedium)
                     .foregroundColor(.white)
                     .transition(.opacity)
@@ -197,43 +191,24 @@ struct MiniRecorderView: View {
         .contextMenu {
             modelSelectionMenu
         }
-        .onReceive(NotificationCenter.default.publisher(for: .recordingStartRequested)) { _ in
-            startRecording()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .recordingStopRequested)) { _ in
-            stopAndTranscribe()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .recordingCancelRequested)) { _ in
-            cancelRecording()
+        .onChange(of: viewModel.pendingAction) { _, _ in
+            // Drain the VM's action queue. SwiftUI guarantees this fires
+            // after the @Published mutation is observed, so there is no
+            // subscription race — the previous NotificationCenter path
+            // could drop events if the view hadn't rendered yet.
+            switch viewModel.consumeAction() {
+            case .start:  startRecording()
+            case .stop:   stopAndTranscribe()
+            case .cancel: cancelRecording()
+            case .none:   break
+            }
         }
         .onAppear {
             initializedService()
-
-            // Set up Escape key monitors
-            globalEscapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
-                if event.keyCode == 53 {
-                    Task { @MainActor in self.handleEscape() }
-                }
-            }
-            localEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                if event.keyCode == 53 {
-                    Task { @MainActor in self.handleEscape() }
-                    return nil  // swallow Escape
-                }
-                return event
-            }
         }
-        .onDisappear {
-            if let globalEscapeMonitor = globalEscapeMonitor {
-                NSEvent.removeMonitor(globalEscapeMonitor)
-            }
-            if let localEscapeMonitor = localEscapeMonitor {
-                NSEvent.removeMonitor(localEscapeMonitor)
-            }
-        }
-        .onChange(of: isListening) {
+        .onChange(of: viewModel.isListening) {
             // Only animate when actually recording to save CPU
-            if isListening {
+            if viewModel.isListening {
                 withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
                     phase = .pi * 4
                 }
@@ -313,14 +288,14 @@ struct MiniRecorderView: View {
                 // Pre-load the new model immediately so the first transcription isn't slow
                 if model.variant != previousModel {
                     Task {
-                        await MainActor.run { isWarmingUp = true }
+                        await MainActor.run { viewModel.isWarmingUp = true }
                         do {
                             try await whisperService.loadModel(variant: model.variant)
                             debugLog("Model pre-loaded after switch: \(model.variant)")
                         } catch {
                             debugLog("Model pre-load failed: \(error.localizedDescription)")
                         }
-                        await MainActor.run { isWarmingUp = false }
+                        await MainActor.run { viewModel.isWarmingUp = false }
                     }
                 }
             } label: {
@@ -356,7 +331,7 @@ struct MiniRecorderView: View {
     }
 
     private func handleHotkeyTrigger() {
-        if isListening {
+        if viewModel.isListening {
             stopAndTranscribe()
         } else {
             startRecording()
@@ -364,11 +339,11 @@ struct MiniRecorderView: View {
     }
 
     private func cancelRecording() {
-        cancelCommit = true
+        viewModel.cancelCommit = true
 
-        guard isListening || audioRecorder.isRecording else {
-            isProcessing = false
-            onCancel?()
+        guard viewModel.isListening || audioRecorder.isRecording else {
+            viewModel.isProcessing = false
+            viewModel.cancel()
             return
         }
 
@@ -376,21 +351,21 @@ struct MiniRecorderView: View {
             _ = await audioRecorder.stopRecording(discardOutput: true)
 
             await MainActor.run {
-                isListening = false
-                isProcessing = false
-                statusMessage = "Transcribing..."
-                onCancel?()
+                viewModel.isListening = false
+                viewModel.isProcessing = false
+                viewModel.statusMessage = "Transcribing..."
+                viewModel.cancel()
             }
         }
     }
 
     private func startRecording() {
-        guard !isProcessing else {
+        guard !viewModel.isProcessing else {
             debugLog("Already processing, ignoring start request")
             return
         }
 
-        guard !isListening else {
+        guard !viewModel.isListening else {
             debugLog("Already listening, ignoring duplicate start request")
             return
         }
@@ -403,13 +378,13 @@ struct MiniRecorderView: View {
         // Check if model is selected BEFORE starting recording
         guard !selectedModel.isEmpty else {
             debugLog("No model selected - showing error")
-            isProcessing = true
-            statusMessage = "No model selected"
+            viewModel.isProcessing = true
+            viewModel.statusMessage = "No model selected"
 
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                isProcessing = false
-                onCancel?()
+                viewModel.isProcessing = false
+                viewModel.cancel()
             }
             return
         }
@@ -418,28 +393,28 @@ struct MiniRecorderView: View {
         let progress = ModelDownloadService.shared.downloadProgress[selectedModel] ?? 0
         guard progress >= 1.0 else {
             debugLog("Model not downloaded - showing error")
-            isProcessing = true
-            statusMessage = "Model not downloaded"
+            viewModel.isProcessing = true
+            viewModel.statusMessage = "Model not downloaded"
 
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                isProcessing = false
-                onCancel?()
+                viewModel.isProcessing = false
+                viewModel.cancel()
             }
             return
         }
 
-        cancelCommit = false
+        viewModel.cancelCommit = false
 
         debugLog("Starting recording...")
         audioRecorder.startRecording()
-        isListening = true
+        viewModel.isListening = true
     }
 
     private func stopAndTranscribe() {
         debugLog("stopAndTranscribe called")
 
-        guard isListening || audioRecorder.isRecording else {
+        guard viewModel.isListening || audioRecorder.isRecording else {
             debugLog("Not listening, ignoring duplicate stop request")
             return
         }
@@ -448,13 +423,13 @@ struct MiniRecorderView: View {
         guard !selectedModel.isEmpty else {
             debugLog("No model selected - cannot transcribe")
             Task { @MainActor in
-                isListening = false
-                isProcessing = false
-                statusMessage = "No AI model selected. Go to Settings → AI Models to download one."
+                viewModel.isListening = false
+                viewModel.isProcessing = false
+                viewModel.statusMessage = "No AI model selected. Go to Settings → AI Models to download one."
 
                 // Show error for 3 seconds
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
-                onCancel?()
+                viewModel.cancel()
             }
             return
         }
@@ -466,16 +441,16 @@ struct MiniRecorderView: View {
             guard let url = url else {
                 debugLog("No recording URL, cancelling")
                 await MainActor.run {
-                    isListening = false
-                    onCancel?()
+                    viewModel.isListening = false
+                    viewModel.cancel()
                 }
                 return
             }
 
             await MainActor.run {
-                isListening = false
-                isProcessing = true
-                statusMessage = "Transcribing..."
+                viewModel.isListening = false
+                viewModel.isProcessing = true
+                viewModel.statusMessage = "Transcribing..."
             }
 
             // Always use the final full-recording transcription for committed output.
@@ -485,19 +460,19 @@ struct MiniRecorderView: View {
     }
 
     private func handleEscape() {
-        guard isListening || isProcessing || isWarmingUp || whisperService.isLoading else { return }
+        guard viewModel.isListening || viewModel.isProcessing || viewModel.isWarmingUp || whisperService.isLoading else { return }
 
         debugLog("Escape pressed - cancelling immediate commit")
-        cancelCommit = true
+        viewModel.cancelCommit = true
 
-        if isListening {
+        if viewModel.isListening {
             Task {
                 let url = await audioRecorder.stopRecording()
 
                 await MainActor.run {
-                    isListening = false
-                    isProcessing = true
-                    statusMessage = "Stopping transcription..."
+                    viewModel.isListening = false
+                    viewModel.isProcessing = true
+                    viewModel.statusMessage = "Stopping transcription..."
                 }
 
                 if let url = url {
@@ -505,33 +480,45 @@ struct MiniRecorderView: View {
                     await processRecording(url: url)
                 } else {
                     await MainActor.run {
-                        onCancel?()
+                        viewModel.cancel()
                     }
                 }
             }
         } else {
             // Already processing, just show stopping and quickly dismiss
-            statusMessage = "Stopping transcription..."
+            viewModel.statusMessage = "Stopping transcription..."
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                onCancel?()
+                viewModel.cancel()
             }
         }
     }
 
     private func debugLog(_ message: String) {
-        let logPath = "/tmp/speaktype_debug.log"
-        let logEntry = "[\(Date())] \(message)\n"
-        if let data = logEntry.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: logPath) {
-                if let handle = FileHandle(forWritingAtPath: logPath) {
-                    handle.seekToEndOfFile()
-                    handle.write(data)
-                    handle.closeFile()
-                }
-            } else {
-                FileManager.default.createFile(atPath: logPath, contents: data)
-            }
+        // Only write to disk in DEBUG builds. Release builds fall back to
+        // the unified logging system (os_log) so we don't leak diagnostic
+        // text to a world-readable file in shipped binaries.
+        #if DEBUG
+        guard let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first else { return }
+        let logDir = appSupport.appendingPathComponent("SpeakType/Logs")
+        try? FileManager.default.createDirectory(
+            at: logDir, withIntermediateDirectories: true)
+        let logFile = logDir.appendingPathComponent("debug.log")
+        let entry = "[\(Date())] \(message)\n"
+        guard let data = entry.data(using: .utf8) else { return }
+
+        if FileManager.default.fileExists(atPath: logFile.path),
+           let handle = try? FileHandle(forWritingTo: logFile) {
+            defer { try? handle.close() }
+            try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: logFile)
         }
+        #else
+        print("[SpeakType] \(message)")
+        #endif
     }
 
     private func processRecording(url: URL) async {
@@ -541,17 +528,17 @@ struct MiniRecorderView: View {
             if !whisperService.isInitialized || whisperService.currentModelVariant != selectedModel
             {
                 debugLog("Loading model: \(selectedModel)")
-                await MainActor.run { statusMessage = "Warming up model — first use is slower..." }
+                await MainActor.run { viewModel.statusMessage = "Warming up model — first use is slower..." }
                 do {
                     try await whisperService.loadModel(variant: selectedModel)
                     debugLog("Model loaded successfully")
                 } catch {
                     debugLog("Model load failed: \(error.localizedDescription)")
                     await MainActor.run {
-                        statusMessage = "Model load failed"
+                        viewModel.statusMessage = "Model load failed"
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                            self.isProcessing = false
-                            self.onCancel?()
+                            viewModel.isProcessing = false
+                            viewModel.cancel()
                         }
                     }
                     return
@@ -561,8 +548,8 @@ struct MiniRecorderView: View {
             debugLog("Starting transcription...")
             // If user has already cancelled (pressed Escape), skip transcription UI updates
             // but still run the transcription in the background to save to history
-            if !cancelCommit {
-                await MainActor.run { statusMessage = "Transcribing..." }
+            if !viewModel.cancelCommit {
+                await MainActor.run { viewModel.statusMessage = "Transcribing..." }
             }
             let text = try await whisperService.transcribe(audioFile: url, language: transcriptionLanguage)
             debugLog("Transcription result: \(text.prefix(50))...")
@@ -570,10 +557,10 @@ struct MiniRecorderView: View {
             guard !text.isEmpty else {
                 debugLog("Empty text, cancelling")
                 await MainActor.run {
-                    statusMessage = "No speech detected"
+                    viewModel.statusMessage = "No speech detected"
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        self.isProcessing = false
-                        self.onCancel?()
+                        viewModel.isProcessing = false
+                        viewModel.cancel()
                     }
                 }
                 return
@@ -593,25 +580,25 @@ struct MiniRecorderView: View {
 
             debugLog("Calling onCommit...")
             await MainActor.run {
-                if !cancelCommit {
-                    onCommit?(text)
+                if !viewModel.cancelCommit {
+                    viewModel.commit(text: text)
                 }
-                isProcessing = false
+                viewModel.isProcessing = false
 
                 // If we cancelled by dismissing early, the window might already be closed,
                 // but if we waited for it (e.g. short transcription), close it now.
-                if cancelCommit {
-                    onCancel?()
+                if viewModel.cancelCommit {
+                    viewModel.cancel()
                 }
             }
             debugLog("onCommit called successfully")
         } catch {
             debugLog("Error: \(error.localizedDescription)")
             await MainActor.run {
-                statusMessage = "Transcription failed"
+                viewModel.statusMessage = "Transcription failed"
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    self.isProcessing = false
-                    self.onCancel?()
+                    viewModel.isProcessing = false
+                    viewModel.cancel()
                 }
             }
         }

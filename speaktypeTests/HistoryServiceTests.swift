@@ -18,15 +18,42 @@ final class HistoryServiceTests: XCTestCase {
     
     func testAddItem() {
         XCTAssertTrue(service.items.isEmpty)
-        
+
         let transcript = "Test Transcript"
         let duration: TimeInterval = 10.0
-        
+
         service.addItem(transcript: transcript, duration: duration)
-        
+
         XCTAssertEqual(service.items.count, 1)
         XCTAssertEqual(service.items.first?.transcript, transcript)
         XCTAssertEqual(service.items.first?.duration, duration)
+    }
+
+    // MARK: - Low #13: deleteItem must tolerate stale IndexSet offsets
+    // Regression guard for rapid-delete UI races where SwiftUI passes
+    // offsets that were valid a tick ago but now exceed `items.count`.
+
+    func testDeleteItemIgnoresOutOfBoundsOffsets() {
+        service.addItem(transcript: "one", duration: 1)
+        service.addItem(transcript: "two", duration: 2)
+        XCTAssertEqual(service.items.count, 2)
+
+        // Offsets 0 is valid; 5 and 10 are stale/invalid. The call must
+        // not crash and must remove only the valid offset.
+        let mixedOffsets: IndexSet = IndexSet([0, 5, 10])
+        service.deleteItem(at: mixedOffsets, deleteAudioFile: false)
+
+        XCTAssertEqual(service.items.count, 1,
+            "deleteItem must drop only the valid offset and ignore the invalid ones.")
+    }
+
+    func testDeleteItemHandlesFullyInvalidOffsetsWithoutCrash() {
+        service.addItem(transcript: "only", duration: 1)
+        let bogusOffsets: IndexSet = IndexSet([4, 7])
+        service.deleteItem(at: bogusOffsets, deleteAudioFile: false)
+
+        XCTAssertEqual(service.items.count, 1,
+            "Fully invalid offsets must be a safe no-op.")
     }
     
     func testPersistence() {

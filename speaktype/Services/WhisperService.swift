@@ -85,6 +85,11 @@ class WhisperService {
 
     // Dynamic model loading with optimized WhisperKitConfig
     func loadModel(variant: String) async throws {
+        // Cheap pre-guard: if the caller already cancelled the task (e.g.
+        // user rapidly switched models), short-circuit before flipping any
+        // state or launching the expensive WhisperKit init.
+        try Task.checkCancellation()
+
         // Already loaded this exact model
         if isInitialized && variant == currentModelVariant && pipe != nil {
             print("✅ Model \(variant) already loaded, skipping")
@@ -112,6 +117,13 @@ class WhisperService {
         isLoading = true
         isInitialized = false
         loadingStage = "Preparing model..."
+        // Guarantee isLoading resets on every exit path — success, throw,
+        // or CancellationError — so a cancelled load never leaves the
+        // service wedged as "already loading".
+        defer {
+            isLoading = false
+            loadingStage = ""
+        }
 
         // Release existing model to free memory
         if pipe != nil {
@@ -119,48 +131,54 @@ class WhisperService {
             pipe = nil
         }
 
+        let documentDirectory = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask
+        ).first!
+        let modelFolderPath = documentDirectory.appendingPathComponent(
+            "huggingface/models/argmaxinc/whisperkit-coreml/\(variant)"
+        ).path
+
+        // Use WhisperKitConfig with optimized settings
+        let config = WhisperKitConfig(
+            model: variant,
+            modelFolder: modelFolderPath,
+            computeOptions: ModelComputeOptions(),  // Uses GPU + Neural Engine
+            verbose: false,
+            logLevel: .error,
+            prewarm: true,  // Built-in model specialization (replaces manual warmup)
+            load: true,
+            download: false  // Already downloaded via ModelDownloadService
+        )
+
+        loadingStage = "Loading AI model..."
+        let loadStart = Date()
+
+        let newPipe: WhisperKit
         do {
-            let documentDirectory = FileManager.default.urls(
-                for: .documentDirectory, in: .userDomainMask
-            ).first!
-            let modelFolderPath = documentDirectory.appendingPathComponent(
-                "huggingface/models/argmaxinc/whisperkit-coreml/\(variant)"
-            ).path
-
-            // Use WhisperKitConfig with optimized settings
-            let config = WhisperKitConfig(
-                model: variant,
-                modelFolder: modelFolderPath,
-                computeOptions: ModelComputeOptions(),  // Uses GPU + Neural Engine
-                verbose: false,
-                logLevel: .error,
-                prewarm: true,  // Built-in model specialization (replaces manual warmup)
-                load: true,
-                download: false  // Already downloaded via ModelDownloadService
-            )
-
-            loadingStage = "Loading AI model..."
-
-            // Start a watchdog timer that will flag a timeout
-            let loadStart = Date()
-
-            pipe = try await WhisperKit(config)
-
-            let loadDuration = Date().timeIntervalSince(loadStart)
-            print("⏱️ Model loaded in \(String(format: "%.1f", loadDuration))s")
-
-            currentModelVariant = variant
-            isInitialized = true
-            isLoading = false
-            loadingStage = ""
-            print("✅ WhisperKit initialized and prewarmed with \(variant)")
+            newPipe = try await WhisperKit(config)
         } catch {
-            isLoading = false
-            loadingStage = ""
             print(
                 "❌ Failed to initialize WhisperKit with \(variant): \(error.localizedDescription)")
             throw error
         }
+
+        // Post-guard: WhisperKit's init is not interruptible, so if the
+        // caller cancelled while we were awaiting, we now own a fully-
+        // built pipe the caller no longer wants. Drop it and throw.
+        do {
+            try Task.checkCancellation()
+        } catch {
+            // Let ARC release newPipe.
+            throw error
+        }
+
+        let loadDuration = Date().timeIntervalSince(loadStart)
+        print("⏱️ Model loaded in \(String(format: "%.1f", loadDuration))s")
+
+        pipe = newPipe
+        currentModelVariant = variant
+        isInitialized = true
+        print("✅ WhisperKit initialized and prewarmed with \(variant)")
     }
 
     func transcribe(audioFile: URL, language: String = "auto") async throws -> String {

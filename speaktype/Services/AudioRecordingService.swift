@@ -28,7 +28,19 @@ class AudioRecordingService: NSObject, ObservableObject {
     private var currentFileURL: URL?
     private var isSessionStarted = false
     private var setupTask: Task<Void, Never>?
-    private var isStopping = false  // Flag to prevent appending during stop
+
+    // Writer-state machine. All transitions occur on `audioQueue` so
+    // captureOutput (also on audioQueue) observes a consistent snapshot.
+    // This replaces the old `isStopping: Bool`, which had a TOCTOU race:
+    // captureOutput could pass the guard and then append into a writer
+    // that the main thread had already nilled or finished.
+    // Pattern mirrors Apple's RosyWriter MovieRecorder sample.
+    private enum RecordingStatus {
+        case idle
+        case recording
+        case finishing
+    }
+    private var status: RecordingStatus = .idle  // audioQueue-only
 
     // MARK: - Chunking state
     private var chunkAssetWriter: AVAssetWriter?
@@ -193,14 +205,19 @@ class AudioRecordingService: NSObject, ObservableObject {
         guard !isRecording else { return }
         if captureSession == nil { setupSession() }
 
-        // 1. Reset flags and stale writer state before any new samples arrive.
-        isStopping = false
         shouldDiscardCurrentRecordingOutput = false
-        resetMainWriterState()
-        resetChunkWriterState()
         isRecording = true
+        recordingStartTime = Date()
 
-        // 2. Wrap setup in a Task so stopRecording can wait for it
+        // Reset writer state on audioQueue so captureOutput observes a clean
+        // slate before any samples flow. The gate stays closed (status=.idle)
+        // until the writer is published below.
+        audioQueue.async {
+            self.status = .idle
+            self.resetMainWriterState()
+            self.resetChunkWriterState()
+        }
+
         setupTask = Task { @MainActor in
             // Ensure capture session is running before setting up the writer
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -208,7 +225,6 @@ class AudioRecordingService: NSObject, ObservableObject {
                     if self.captureSession?.isRunning != true {
                         print("🎤 Starting capture session...")
                         self.captureSession?.startRunning()
-                        // Wait for session to be ready
                         Thread.sleep(forTimeInterval: 0.3)
                         print("🎤 Capture session started")
                     }
@@ -218,10 +234,9 @@ class AudioRecordingService: NSObject, ObservableObject {
 
             let url = getRecordingsDirectory().appendingPathComponent(
                 "recording-\(Date().timeIntervalSince1970).wav")
-            currentFileURL = url
 
             do {
-                assetWriter = try AVAssetWriter(outputURL: url, fileType: .wav)
+                let writer = try AVAssetWriter(outputURL: url, fileType: .wav)
 
                 // Use standard WAV format compatible with WhisperKit
                 let settings: [String: Any] = [
@@ -234,15 +249,21 @@ class AudioRecordingService: NSObject, ObservableObject {
                     AVLinearPCMIsNonInterleaved: false,
                 ]
 
-                assetWriterInput = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
-                assetWriterInput?.expectsMediaDataInRealTime = true
+                let input = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
+                input.expectsMediaDataInRealTime = true
+                if writer.canAdd(input) { writer.add(input) }
+                writer.startWriting()
 
-                if assetWriter?.canAdd(assetWriterInput!) == true {
-                    assetWriter?.add(assetWriterInput!)
+                // Publish writers to audioQueue and OPEN THE GATE. captureOutput
+                // will only start appending once it sees status == .recording
+                // alongside non-nil writer/input.
+                audioQueue.async {
+                    self.currentFileURL = url
+                    self.assetWriter = writer
+                    self.assetWriterInput = input
+                    self.isSessionStarted = false
+                    self.status = .recording
                 }
-
-                assetWriter?.startWriting()
-                isSessionStarted = false
 
                 DispatchQueue.main.async {
                     self.audioLevel = 0.0
@@ -253,9 +274,10 @@ class AudioRecordingService: NSObject, ObservableObject {
 
             } catch {
                 print("Error starting recording: \(error)")
-                isRecording = false  // Revert if failed
+                isRecording = false
                 audioQueue.async {
                     self.captureSession?.stopRunning()
+                    self.status = .idle
                 }
             }
         }
@@ -265,57 +287,77 @@ class AudioRecordingService: NSObject, ObservableObject {
         // Wait for setup to complete if it's running
         _ = await setupTask?.value
 
-        guard isRecording, let url = currentFileURL else { return nil }
-        shouldDiscardCurrentRecordingOutput = discardOutput
+        // Quick main-thread check for the public flag. The authoritative
+        // gate is on audioQueue below — this guard just avoids the dispatch
+        // in the common "not recording" case.
+        guard isRecording else {
+            await MainActor.run {
+                self.audioLevel = 0.0
+                self.audioFrequency = 0.0
+            }
+            return nil
+        }
 
-        // Ensure minimum recording duration to prevent empty/corrupted WAV files
-        if let startTime = currentFileURL?.path.components(separatedBy: "-").last?
-            .replacingOccurrences(of: ".wav", with: ""),
-            let startTimestamp = Double(startTime)
-        {
-            let duration = Date().timeIntervalSince1970 - startTimestamp
+        // Ensure minimum recording duration to prevent empty/corrupted WAV files.
+        if let startTime = recordingStartTime {
+            let duration = Date().timeIntervalSince(startTime)
             if duration < 0.5 {
                 try? await Task.sleep(nanoseconds: UInt64((0.5 - duration) * 1_000_000_000))
             }
         }
 
-        // Set stopping flag BEFORE anything else to prevent race conditions
-        isStopping = true
-        isRecording = false  // Stop capturing new frames immediately
-        DispatchQueue.main.async {
+        await MainActor.run {
+            self.isRecording = false  // UI flips immediately
             self.audioLevel = 0.0
             self.audioFrequency = 0.0
         }
 
         return await withCheckedContinuation { continuation in
             audioQueue.async {
-                // --- Finalize the last in-flight chunk ---
+                // Authoritative gate. Concurrent stopRecording callers or
+                // stops-before-setup-completed fall through here as no-ops.
+                guard self.status == .recording else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                self.status = .finishing
+                self.shouldDiscardCurrentRecordingOutput = discardOutput
+                let discard = discardOutput
+
+                // Detach main-writer references under the queue. captureOutput
+                // will never see them again — status is now .finishing.
+                let writer = self.assetWriter
+                let writerInput = self.assetWriterInput
+                let mainURL = self.currentFileURL
+                self.resetMainWriterState()
+
+                // Detach chunk-writer references the same way.
+                let chunkWriter = self.chunkAssetWriter
+                let chunkInput = self.chunkAssetWriterInput
+                let chunkURL = self.chunkFileURL
+                let chunkStarted = self.chunkIsSessionStarted
+                self.resetChunkWriterState()
+
                 let finishGroup = DispatchGroup()
                 var finalizedRecordingURL: URL?
-                let discardOutput = self.shouldDiscardCurrentRecordingOutput
 
-                if let lastChunkInput = self.chunkAssetWriterInput,
-                    let lastChunkWriter = self.chunkAssetWriter,
-                    let lastChunkURL = self.chunkFileURL,
-                    self.chunkIsSessionStarted
-                {
-                    self.resetChunkWriterState()
-
+                // --- Finalize the last in-flight chunk ---
+                if let ci = chunkInput, let cw = chunkWriter, let cu = chunkURL, chunkStarted {
                     finishGroup.enter()
-                    lastChunkInput.markAsFinished()
-                    lastChunkWriter.finishWriting {
+                    ci.markAsFinished()
+                    cw.finishWriting {
+                        // finishWriting completion runs on an arbitrary queue —
+                        // bounce back to audioQueue before touching state.
                         self.audioQueue.async {
-                            if discardOutput {
-                                try? FileManager.default.removeItem(at: lastChunkURL)
-                            } else if let validChunkURL = self.validatedAudioFileURL(
-                                at: lastChunkURL,
-                                writer: lastChunkWriter,
-                                label: "Final chunk"
+                            if discard {
+                                try? FileManager.default.removeItem(at: cu)
+                            } else if let valid = self.validatedAudioFileURL(
+                                at: cu, writer: cw, label: "Final chunk"
                             ) {
-                                print("🔪 Final chunk saved: \(validChunkURL.lastPathComponent)")
-                                self.chunkPublisher.send(validChunkURL)
+                                print("🔪 Final chunk saved: \(valid.lastPathComponent)")
+                                self.chunkPublisher.send(valid)
                             } else {
-                                try? FileManager.default.removeItem(at: lastChunkURL)
+                                try? FileManager.default.removeItem(at: cu)
                             }
                             finishGroup.leave()
                         }
@@ -323,22 +365,16 @@ class AudioRecordingService: NSObject, ObservableObject {
                 }
 
                 // --- Finalize main (full) recording ---
-                let writer = self.assetWriter
-                let writerInput = self.assetWriterInput
-                self.resetMainWriterState()
-
-                if let writer {
+                if let w = writer, let url = mainURL {
                     finishGroup.enter()
                     writerInput?.markAsFinished()
-                    writer.finishWriting {
+                    w.finishWriting {
                         self.audioQueue.async {
-                            if discardOutput {
+                            if discard {
                                 try? FileManager.default.removeItem(at: url)
                             } else {
                                 finalizedRecordingURL = self.validatedAudioFileURL(
-                                    at: url,
-                                    writer: writer,
-                                    label: "Recording"
+                                    at: url, writer: w, label: "Recording"
                                 )
                                 if let finalizedRecordingURL {
                                     print("Recording finished saving to \(finalizedRecordingURL.path)")
@@ -354,8 +390,9 @@ class AudioRecordingService: NSObject, ObservableObject {
                 finishGroup.notify(queue: self.audioQueue) {
                     // Keep microphone fully idle outside active recordings.
                     self.captureSession?.stopRunning()
-                    self.isStopping = false
+                    self.status = .idle
                     self.shouldDiscardCurrentRecordingOutput = false
+                    self.recordingStartTime = nil
                     continuation.resume(returning: finalizedRecordingURL)
                 }
             }
@@ -423,8 +460,10 @@ extension AudioRecordingService: AVCaptureAudioDataOutputSampleBufferDelegate {
 
         processAudioLevel(from: sampleBuffer)
 
-        // Don't append if we're stopping - prevents race condition crash
-        guard !isStopping else { return }
+        // Authoritative writer gate — same serial queue as all status
+        // transitions, so no TOCTOU race. After a stop, status flips to
+        // .finishing on this queue and all subsequent appends drop silently.
+        guard status == .recording else { return }
         guard let writer = assetWriter, let input = assetWriterInput else { return }
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
@@ -437,7 +476,6 @@ extension AudioRecordingService: AVCaptureAudioDataOutputSampleBufferDelegate {
             }
 
             if input.isReadyForMoreMediaData {
-                guard !isStopping else { return }
                 input.append(sampleBuffer)
             }
         }
@@ -449,7 +487,7 @@ extension AudioRecordingService: AVCaptureAudioDataOutputSampleBufferDelegate {
     // MARK: - Chunk Writer Helpers (audioQueue)
 
     private func appendToChunk(sampleBuffer: CMSampleBuffer, pts: CMTime) {
-        guard !isStopping else { return }
+        guard status == .recording else { return }
 
         // Initialize first chunk on first buffer
         if chunkAssetWriter == nil {
@@ -467,7 +505,6 @@ extension AudioRecordingService: AVCaptureAudioDataOutputSampleBufferDelegate {
         }
 
         if ci.isReadyForMoreMediaData {
-            guard !isStopping else { return }
             ci.append(sampleBuffer)
         }
 

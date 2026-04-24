@@ -89,9 +89,15 @@ struct AIModel: Identifiable, Equatable {
 
     /// Returns the best model recommended for this device's RAM
     static func recommendedModel(forDeviceRAMGB ram: Int) -> AIModel {
-        // Find the best (highest accuracy) model that fits in the device's RAM
-        return availableModels.first(where: { ram >= $0.minimumRAMGB })
-            ?? availableModels.last!  // Fallback to smallest
+        // availableModels is ordered largest→smallest, so `last` is the
+        // smallest model. It is a compile-time constant and non-empty;
+        // the precondition documents that invariant without crashing
+        // at the call site for ordinary inputs (ram=0, negative, etc.).
+        let fitted = availableModels.first(where: { ram >= $0.minimumRAMGB })
+        guard let smallest = availableModels.last else {
+            preconditionFailure("AIModel.availableModels must never be empty")
+        }
+        return fitted ?? smallest
     }
 
     /// Returns a warning string if this model may not work well on the device, nil otherwise

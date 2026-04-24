@@ -180,32 +180,32 @@ struct TranscribeAudioView: View {
     }
     
     private func handleFileSelection(url: URL) {
-        // Access security scoped resource if needed (for file picker)
+        // Apple-recommended pattern: balance start/stop via `defer` so any
+        // exit path (success, throw, early return) releases the scope.
+        // Copy into an app-owned temp file while scope is held so the
+        // async transcription path (which outlives this function) reads
+        // from a URL whose access isn't tied to a closing scope.
         let didStartAccessing = url.startAccessingSecurityScopedResource()
-        
-        // Create a copy or use the URL directly.
-        // For simplicity in this context, we'll try to use it directly but ensure we stop accessing later if needed.
-        // However, since startTranscription is async, we might lose access.
-        // Better pattern: Copy to temp directory if possible, or keep access open during transcription.
-        // Given WhisperKit might need file access, let's copy to a temp location to be safe and avoid scope issues.
-        
-        do {
-            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(url.lastPathComponent)
-            try? FileManager.default.removeItem(at: tempURL) // Clean up if exists
-            try FileManager.default.copyItem(at: url, to: tempURL)
-            
+        defer {
             if didStartAccessing {
                 url.stopAccessingSecurityScopedResource()
             }
-            
+        }
+
+        // UUID-prefixed name prevents collisions across concurrent picks
+        // that share the same original filename.
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)-\(url.lastPathComponent)")
+
+        do {
+            try? FileManager.default.removeItem(at: tempURL)
+            try FileManager.default.copyItem(at: url, to: tempURL)
             startTranscription(url: tempURL)
         } catch {
+            // No fallback to the original URL: scope ends at the defer
+            // above, so handing the scoped URL to async work would be
+            // unsound. Surface the failure instead.
             print("Error copying file: \(error)")
-            if didStartAccessing {
-                url.stopAccessingSecurityScopedResource()
-            }
-            // Fallback: try original URL if copy fails
-            startTranscription(url: url)
         }
     }
     

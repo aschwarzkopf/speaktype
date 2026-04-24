@@ -192,7 +192,7 @@ struct HistoryDetailView: View {
         .navigationTitle("Transcript Details")
         .onAppear {
             if let audioURL = item.audioFileURL {
-                audioPlayer.loadAudio(from: audioURL)
+                Task { try? await audioPlayer.loadAudio(from: audioURL) }
             }
         }
         .onDisappear {

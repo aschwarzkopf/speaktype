@@ -4,11 +4,16 @@ import WhisperKit
 
 class ModelDownloadService: ObservableObject {
     static let shared = ModelDownloadService()
-    
+
+    /// Upper bound on download attempts per variant (initial + retries).
+    /// Retries only apply to recoverable errors like "Multiple models found"
+    /// cache collisions where a cleanup pass between attempts can help.
+    static let maxDownloadAttempts = 2
+
     @Published var downloadProgress: [String: Double] = [:] // Map Model Variant (String) to progress
     @Published var downloadError: [String: String] = [:] // Debugging: track errors
     @Published var isDownloading: [String: Bool] = [:]
-    
+
     private var activeTasks: [String: Task<Void, Never>] = [:] // Track running download tasks
     
     private init() {
@@ -127,10 +132,16 @@ class ModelDownloadService: ObservableObject {
         print("Starting WhisperKit download for: \(variant)")
         
         let task = Task {
-            // Debug: List what WhisperKit sees
-            // Note: WhisperKit API might differ, but let's try to see if we can get info.
-            // If fetchAvailableModels exists.
-            
+            // Exactly-once cleanup of the task handle regardless of which
+            // code path (success, retry-success, retry-fail, cancellation)
+            // we exit through. Replaces the scattered manual nils that
+            // previously made it easy to leak entries on error.
+            defer {
+                DispatchQueue.main.async {
+                    self.activeTasks[variant] = nil
+                }
+            }
+
             do {
                 // Determine model variant enum/string
                 // Note: WhisperKit.download(variant:from:) is the likely API.
@@ -230,104 +241,93 @@ class ModelDownloadService: ObservableObject {
         activeTasks[variant] = task
     }
     
-    // Aggressively deletes any potential cache for this variant
+    /// Pure, testable predicate for whether a file/dir at `fileName` should
+    /// be deleted as part of a variant cleanup. Uses **exact** last-path-
+    /// component equality (optionally with the `/`→`--` HuggingFace alias)
+    /// so unrelated files with overlapping substrings (e.g. "my-whisper-
+    /// notes.md") are not accidentally swept up.
+    static func shouldDelete(fileName: String, patterns: [String]) -> Bool {
+        for pattern in patterns {
+            if fileName == pattern { return true }
+            let hfAlias = pattern.replacingOccurrences(of: "/", with: "--")
+            if fileName == hfAlias { return true }
+        }
+        return false
+    }
+
+    /// Deletes cached files for a given model variant. Only touches paths
+    /// this app manages — Application Support, Caches, and the standard
+    /// Documents/huggingface tree WhisperKit uses. /tmp and ~/.cache are
+    /// no longer scanned: a sandboxed app can't meaningfully clean them,
+    /// and they belong to other processes.
     func deleteModel(variant: String) async -> String {
         let fileManager = FileManager.default
-        let searchDirs: [FileManager.SearchPathDirectory] = [.documentDirectory, .applicationSupportDirectory, .cachesDirectory]
-        
+        let searchDirs: [FileManager.SearchPathDirectory] = [
+            .documentDirectory, .applicationSupportDirectory, .cachesDirectory,
+        ]
+
         // Parse variant: "openai/whisper-medium" or "openai_whisper-medium"
         let variantParts = variant.split(separator: "/")
-        let modelName = variantParts.last ?? Substring(variant)
-        
-        // Also search for underscore version: openai_whisper-medium
+        let modelName = String(variantParts.last ?? Substring(variant))
         let underscoreVariant = variant.replacingOccurrences(of: "/", with: "_")
-        
+        let patterns = [modelName, underscoreVariant]
+
         var deletedCount = 0
         var checkedPaths: [String] = []
-        
-        print("🗑️ Searching for model caches matching: '\(modelName)' or '\(underscoreVariant)'")
-        
-        // 1. Check Standard macOS Paths
+
+        print("🗑️ Searching for model caches matching exactly: \(patterns)")
+
         for searchDir in searchDirs {
-            guard let baseDir = fileManager.urls(for: searchDir, in: .userDomainMask).first else { continue }
-            
-            // Check ./huggingface/models (HuggingFace cache)
-            let hfModelsDir = baseDir.appendingPathComponent("huggingface/models")
-            checkedPaths.append(hfModelsDir.path)
-            deletedCount += cleanupDirectory(hfModelsDir, matchAny: [String(modelName), underscoreVariant])
-            
-            // Check ./huggingface/hub (Alternative HF structure)
-            let hfHubDir = baseDir.appendingPathComponent("huggingface/hub")
-            checkedPaths.append(hfHubDir.path)
-            deletedCount += cleanupDirectory(hfHubDir, matchAny: [String(modelName), underscoreVariant])
-            
-            // Skip the old SpeakType-specific directory (no longer used)
-            
-            // Check root directory (sometimes models are here)
-            deletedCount += cleanupDirectory(baseDir, matchAny: [String(modelName), underscoreVariant])
+            guard let baseDir = fileManager.urls(for: searchDir, in: .userDomainMask).first
+            else { continue }
+
+            let candidates = [
+                baseDir.appendingPathComponent("huggingface/models"),
+                baseDir.appendingPathComponent("huggingface/hub"),
+                baseDir.appendingPathComponent(
+                    "huggingface/models/argmaxinc/whisperkit-coreml"),
+                baseDir,
+            ]
+            for candidate in candidates {
+                checkedPaths.append(candidate.path)
+                deletedCount += cleanupDirectory(candidate, patterns: patterns)
+            }
         }
-        
-        // 2. Check ~/.cache (Common for Python/Unix HF tools)
-        let homeDir = fileManager.homeDirectoryForCurrentUser
-        let dotCacheModels = homeDir.appendingPathComponent(".cache/huggingface/models")
-        checkedPaths.append(dotCacheModels.path)
-        deletedCount += cleanupDirectory(dotCacheModels, matchAny: [String(modelName), underscoreVariant])
-        
-        let dotCacheHub = homeDir.appendingPathComponent(".cache/huggingface/hub")
-        checkedPaths.append(dotCacheHub.path)
-        deletedCount += cleanupDirectory(dotCacheHub, matchAny: [String(modelName), underscoreVariant])
-        
-        // 3. Check Temporary Directory
-        let tempDir = fileManager.temporaryDirectory
-        let tempHf = tempDir.appendingPathComponent("huggingface")
-        checkedPaths.append(tempHf.path)
-        deletedCount += cleanupDirectory(tempHf, matchAny: [String(modelName), underscoreVariant])
-        deletedCount += cleanupDirectory(tempDir, matchAny: [String(modelName), underscoreVariant])
-        
-        // 4. Check Documents/huggingface/models/argmaxinc/whisperkit-coreml (standard location)
-        if let documentsDir = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
-            let whisperKitModels = documentsDir.appendingPathComponent("huggingface/models/argmaxinc/whisperkit-coreml")
-            checkedPaths.append(whisperKitModels.path)
-            deletedCount += cleanupDirectory(whisperKitModels, matchAny: [String(modelName), underscoreVariant])
+
+        print(
+            "🗑️ Cleanup complete. Deleted \(deletedCount) items from \(checkedPaths.count) locations"
+        )
+
+        await MainActor.run {
+            self.downloadProgress[variant] = 0.0
+            self.isDownloading[variant] = false
         }
-        
-        print("🗑️ Cleanup complete. Deleted \(deletedCount) items from \(checkedPaths.count) locations")
-        
+
         if deletedCount > 0 {
-            await MainActor.run {
-                self.downloadProgress[variant] = 0.0
-                self.isDownloading[variant] = false
-            }
             return "Deleted \(deletedCount) items"
-        } else {
-            await MainActor.run {
-                self.downloadProgress[variant] = 0.0
-                self.isDownloading[variant] = false
-            }
-            return "No match for '\(modelName)' in \(checkedPaths.count) locations. checked: \(checkedPaths.map { $0.replacingOccurrences(of: homeDir.path, with: "~") }.joined(separator: ", "))"
         }
+        return "No match for '\(modelName)' in \(checkedPaths.count) app-scoped locations"
     }
-    
-    private func cleanupDirectory(_ dir: URL, matchAny patterns: [String]) -> Int {
+
+    private func cleanupDirectory(_ dir: URL, patterns: [String]) -> Int {
         let fileManager = FileManager.default
-        guard let contents = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return 0 }
-        
+        guard
+            let contents = try? fileManager.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil
+            )
+        else { return 0 }
+
         var count = 0
         for url in contents {
-            let fileName = url.lastPathComponent
-            // Check if any pattern matches
-            let matches = patterns.contains { pattern in
-                fileName.contains(pattern) || fileName.contains(pattern.replacingOccurrences(of: "/", with: "--"))
+            guard Self.shouldDelete(fileName: url.lastPathComponent, patterns: patterns) else {
+                continue
             }
-            
-            if matches {
-                do {
-                    try fileManager.removeItem(at: url)
-                    print("✅ Deleted cache: \(url.lastPathComponent)")
-                    count += 1
-                } catch {
-                    print("❌ Failed to delete \(url.lastPathComponent): \(error)")
-                }
+            do {
+                try fileManager.removeItem(at: url)
+                print("✅ Deleted cache: \(url.lastPathComponent)")
+                count += 1
+            } catch {
+                print("❌ Failed to delete \(url.lastPathComponent): \(error)")
             }
         }
         return count

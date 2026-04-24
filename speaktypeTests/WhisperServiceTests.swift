@@ -54,4 +54,39 @@ final class WhisperServiceTests: XCTestCase {
 
         XCTAssertEqual(normalized, "")
     }
+
+    // MARK: - Medium #9: Task cancellation hygiene
+    // Post-fix contract: loadModel honors cooperative cancellation. A
+    // task that is cancelled before loadModel reaches its first await
+    // must throw CancellationError rather than perform the expensive
+    // WhisperKit init.
+    func testLoadModelThrowsCancellationErrorWhenPreCancelled() async {
+        guard let service = service else { return XCTFail("Service should be initialized") }
+
+        let task = Task {
+            try await service.loadModel(variant: "openai_whisper-tiny")
+        }
+        task.cancel()
+
+        do {
+            try await task.value
+            XCTFail("loadModel must throw after cancellation instead of completing.")
+        } catch is CancellationError {
+            // Expected — the pre-cancel check fired before the heavy init.
+        } catch {
+            // Either CancellationError or a swift error whose localization says cancelled.
+            XCTAssertTrue(
+                (error as NSError).localizedDescription.localizedCaseInsensitiveContains("cancel")
+                    || error is CancellationError,
+                "Expected cancellation-shaped error, got \(error)"
+            )
+        }
+
+        // State hygiene: after a cancelled load, the service must not claim
+        // to be initialized on the cancelled variant.
+        XCTAssertFalse(service.isInitialized && service.currentModelVariant == "openai_whisper-tiny",
+            "A cancelled loadModel must not leave the service in an initialized state for that variant.")
+        XCTAssertFalse(service.isLoading,
+            "isLoading must return to false after cancellation so future loads aren't blocked.")
+    }
 }

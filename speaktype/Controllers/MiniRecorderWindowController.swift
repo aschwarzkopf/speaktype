@@ -1,14 +1,45 @@
 import Cocoa
 import SwiftUI
 
+/// Nonactivating panel that is still allowed to become key — without this,
+/// a borderless `.nonactivatingPanel` never becomes first responder and
+/// keyDown events (e.g. Escape) never reach our KeyEventHandlerView.
+/// canBecomeMain stays false so the panel does not steal focus from the
+/// target app the user is about to paste into.
+final class KeyableMiniRecorderPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
 class MiniRecorderWindowController: NSObject {
-    private var panel: NSPanel?
+    private var panel: KeyableMiniRecorderPanel?
     private var hostingController: NSHostingController<AnyView>?
     private var lastActiveApp: NSRunningApplication?
 
-    // Start recording - show panel and begin recording
+    /// The view model that drives MiniRecorderView. The controller mutates
+    /// it directly instead of posting notifications — this eliminates the
+    /// subscription-timing race in the old NotificationCenter + `.id()`
+    /// rebuild design. Exposed `let` so SwiftUI observes via @ObservedObject
+    /// and tests can assert on state transitions.
+    let viewModel = MiniRecorderViewModel()
+
+    /// Back-compat accessor — existing call sites used `currentSessionID`.
+    var currentSessionID: UUID { viewModel.sessionID }
+
+    override init() {
+        super.init()
+        viewModel.onCommit = { [weak self] text in
+            self?.handleCommit(text: text)
+        }
+        viewModel.onCancel = { [weak self] in
+            self?.panel?.orderOut(nil)
+        }
+    }
+
+    // MARK: - Session control
+
     func startRecording() {
-        // Capture previous app to restore focus later
         lastActiveApp = NSWorkspace.shared.frontmostApplication
 
         if panel == nil {
@@ -19,60 +50,46 @@ class MiniRecorderWindowController: NSObject {
 
         if !panel.isVisible {
             print("Showing Mini Recorder Panel")
-
-            // Force layout to ensure frame is correct
             panel.layoutIfNeeded()
 
-            // Position above dock with fixed width (panel width should be 220)
             if let screen = NSScreen.main {
                 let visibleFrame = screen.visibleFrame
-                let windowWidth: CGFloat = 260  // Fixed width from setupPanel
+                let windowWidth: CGFloat = 260
                 let x = visibleFrame.midX - (windowWidth / 2)
-                let y = visibleFrame.minY + 50  // 50px padding above dock
+                let y = visibleFrame.minY + 50
                 panel.setFrameOrigin(NSPoint(x: x, y: y))
             } else {
                 panel.center()
             }
 
-            // Show without activating to avoid pulling main app focus unnecessarily
             panel.orderFrontRegardless()
+            panel.makeKey()
         }
 
-        // Trigger instant recording
-        NotificationCenter.default.post(name: .recordingStartRequested, object: nil)
+        // Drive the VM — the observing SwiftUI view reacts via
+        // .onChange(of: pendingAction). No notification race because
+        // @Published subscriptions are attached by SwiftUI before the
+        // mutation is observed.
+        viewModel.startSession()
     }
 
-    // Stop recording - trigger transcription and paste
     func stopRecording() {
-        // 1. Hide recorder immediately - REMOVED so it shows "Transcribing..."
-        // panel?.orderOut(nil)
-
-        // Keep focus unchanged while the hotkey is still being released.
-        // Re-activation happens later during commit, right before auto-paste.
-        NotificationCenter.default.post(name: .recordingStopRequested, object: nil)
+        viewModel.requestStop()
     }
 
     func cancelRecording() {
-        NotificationCenter.default.post(name: .recordingCancelRequested, object: nil)
+        viewModel.requestCancel()
     }
 
+    // MARK: - Setup
+
     private func setupPanel() {
-        // Initialize View with callbacks
-        let recorderView = MiniRecorderView(
-            onCommit: { [weak self] text in
-                self?.handleCommit(text: text)
-            },
-            onCancel: { [weak self] in
-                self?.panel?.orderOut(nil)
-            }
-        )
+        let recorderView = MiniRecorderView(viewModel: viewModel)
+            .background(Color.clear)
 
-        // Initialize hosting controller with transparent background view
-        // Wrap in AnyView because .background() changes the type from MiniRecorderView to some View
-        hostingController = NSHostingController(
-            rootView: AnyView(recorderView.background(Color.clear)))
+        hostingController = NSHostingController(rootView: AnyView(recorderView))
 
-        let p = NSPanel(
+        let p = KeyableMiniRecorderPanel(
             contentRect: NSRect(x: 0, y: 0, width: 260, height: 50),
             styleMask: [.nonactivatingPanel, .fullSizeContentView, .borderless],
             backing: .buffered,
@@ -81,10 +98,8 @@ class MiniRecorderWindowController: NSObject {
 
         p.isOpaque = false
         p.backgroundColor = .clear
-
         p.contentViewController = hostingController
 
-        // Ensure hosting view has transparent background to prevent visual artifacts
         if let hostView = hostingController?.view {
             hostView.wantsLayer = true
             hostView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -92,13 +107,12 @@ class MiniRecorderWindowController: NSObject {
         p.titleVisibility = .hidden
         p.titlebarAppearsTransparent = true
         p.isMovableByWindowBackground = true
-        p.hasShadow = false  // Disable system shadow to avoid transparency artifacts (View has its own shadow)
+        p.hasShadow = false
 
-        // Window Behavior
         p.level = .floating
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         p.isReleasedWhenClosed = false
-        p.hidesOnDeactivate = false  // Keep floating even if focus lost
+        p.hidesOnDeactivate = false
         p.standardWindowButton(.closeButton)?.isHidden = true
         p.standardWindowButton(.miniaturizeButton)?.isHidden = true
         p.standardWindowButton(.zoomButton)?.isHidden = true
@@ -106,61 +120,35 @@ class MiniRecorderWindowController: NSObject {
         self.panel = p
     }
 
+    // MARK: - Commit flow
+
     private func handleCommit(text: String) {
         Task {
-            // 1. Copy to clipboard
             ClipboardService.shared.copy(text: text)
 
-            // 2. Close panel
             await MainActor.run {
                 self.panel?.orderOut(nil)
             }
 
-            // 3. Check accessibility - if not granted, just copy to clipboard silently
             let accessibilityTrusted = ClipboardService.shared.isAccessibilityTrusted
 
             if !accessibilityTrusted {
-                // Text is already copied to clipboard, just return
-                // Don't show annoying popup - user can paste manually with Cmd+V
                 print(
                     "⚠️ Accessibility not granted - text copied to clipboard, user can paste with Cmd+V"
                 )
                 return
             }
 
-            // 4. Re-activate the target app
             if let app = self.lastActiveApp {
                 _ = await MainActor.run {
                     app.activate()
                 }
             }
 
-            // 5. Wait for focus
             try? await Task.sleep(nanoseconds: 500_000_000)
 
-            // 6. Paste using CGEvent (Accessibility permission only)
             await MainActor.run {
                 ClipboardService.shared.paste()
-            }
-        }
-    }
-
-    private func showAccessibilityAlert() {
-        let alert = NSAlert()
-        alert.messageText = "Accessibility Permission Required"
-        alert.informativeText =
-            "SpeakType needs Accessibility permission to automatically paste transcriptions into the active app.\n\nYour transcription has been copied to the clipboard.\n\nTo enable auto-paste, grant permission in:\nSystem Settings → Privacy & Security → Accessibility"
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "OK")
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            if let url = URL(
-                string:
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-            {
-                NSWorkspace.shared.open(url)
             }
         }
     }

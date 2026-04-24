@@ -44,6 +44,11 @@ class LicenseManager: ObservableObject {
     @Published private(set) var licenseKey: String?
     @Published private(set) var expirationDate: Date?
     @Published private(set) var isValidating: Bool = false
+    /// True while a silent background validation of the cached key is in
+    /// flight. UI can render a subtle "verifying…" badge without gating
+    /// Pro features. Distinct from `isValidating`, which covers the
+    /// foreground activateLicense() flow.
+    @Published private(set) var isValidatingLicense: Bool = false
     
     private let keychainHelper = KeychainHelper.shared
     private let polarOrganizationId: String
@@ -146,14 +151,25 @@ class LicenseManager: ObservableObject {
     // MARK: - Validate Existing Key (Silent Check)
     
     private func validateExistingKey(_ key: String) async {
+        isValidatingLicense = true
+        defer { isValidatingLicense = false }
+
         do {
             let validatedKey = try await validateLicenseWithPolar(key: key)
             self.expirationDate = validatedKey.expiresAt
             print("✅ Existing license validated successfully")
-        } catch {
-            // If validation fails, consider the license invalid
-            print("⚠️ Existing license validation failed: \(error.localizedDescription)")
+        } catch let error as LicenseError {
+            // Only revoke on server-confirmed invalid responses. Surfacing
+            // the LicenseError type up from validateLicenseWithPolar means
+            // the server explicitly rejected the key (bad/expired/limit).
+            // Transient network failures fall through to the generic catch
+            // below and preserve cached trust.
+            print("⚠️ License explicitly invalid: \(error.localizedDescription)")
             try? await deactivateLicense()
+        } catch {
+            // Network/transport failure — keep trusting the cached key.
+            // RevenueCat/StoreKit2 pattern: never revoke on timeout.
+            print("ℹ️ License validation deferred (network): \(error.localizedDescription)")
         }
     }
     
