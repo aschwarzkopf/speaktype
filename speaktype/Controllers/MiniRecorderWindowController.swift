@@ -42,6 +42,10 @@ class MiniRecorderWindowController: NSObject {
     func startRecording() {
         lastActiveApp = NSWorkspace.shared.frontmostApplication
 
+        // Play the "listening" tone as soon as the hotkey fires, so the
+        // user gets confirmation before the panel even finishes animating.
+        FeedbackSoundPlayer.shared.playStart()
+
         if panel == nil {
             setupPanel()
         }
@@ -123,6 +127,10 @@ class MiniRecorderWindowController: NSObject {
     // MARK: - Commit flow
 
     private func handleCommit(text: String) {
+        // Play the "commit" tone — slightly lower pitch than playStart
+        // so the up→down interval signals the action completed.
+        FeedbackSoundPlayer.shared.playStop()
+
         Task {
             ClipboardService.shared.copy(text: text)
 
