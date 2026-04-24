@@ -97,19 +97,23 @@ run-dev: stamp-build-info
 	@./scripts/run-dev.sh
 
 # Run all tests
+# SIGN_FLAGS keeps the test build using the stable "SpeakType Dev" cert so
+# TCC grants (Accessibility, Microphone) survive between dev iterations.
+# Plain `xcodebuild test` falls back to ad-hoc signing and silently
+# invalidates those grants.
 test:
 	@echo "Running tests..."
-	xcodebuild test -scheme speaktype -destination 'platform=macOS'
+	xcodebuild test -scheme speaktype -destination 'platform=macOS' $(SIGN_FLAGS)
 
 # Run unit tests only
 test-unit:
 	@echo "Running unit tests..."
-	xcodebuild test -scheme speaktype -destination 'platform=macOS' -only-testing:speaktypeTests
+	xcodebuild test -scheme speaktype -destination 'platform=macOS' -only-testing:speaktypeTests $(SIGN_FLAGS)
 
 # Run UI tests only
 test-ui:
 	@echo "Running UI tests..."
-	xcodebuild test -scheme speaktype -destination 'platform=macOS' -only-testing:speaktypeUITests
+	xcodebuild test -scheme speaktype -destination 'platform=macOS' -only-testing:speaktypeUITests $(SIGN_FLAGS)
 
 # Run SwiftLint
 lint:

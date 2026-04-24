@@ -75,12 +75,22 @@ make build && make run
 ## Development
 
 ```bash
+make setup-signing  # One-time: create stable "SpeakType Dev" cert in your Keychain
 make build          # Build debug
 make run            # Run app
 make clean          # Clean build
 make test           # Run tests
 make dmg            # Create DMG installer
 ```
+
+**Use `make` for local dev — not raw `xcodebuild`.** The `make` targets
+pass signing flags that build with a stable self-signed identity, so
+TCC grants (Accessibility, Microphone) survive rebuilds. Plain
+`xcodebuild` falls back to ad-hoc signing, which changes the binary's
+code-directory hash on every build and silently invalidates
+permissions — you'll see "accessibility not granted" warnings on the
+next run even though nothing changed. Run `make setup-signing` once
+to create the cert.
 
 ### Current Issues
 
