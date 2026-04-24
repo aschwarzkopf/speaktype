@@ -53,6 +53,22 @@ struct MiniRecorderView: View {
         return spokenLanguageDisplayName(for: transcriptionLanguage)
     }
 
+    /// 2-character language label for the compact recorder chip.
+    /// "auto" → a globe glyph; otherwise the uppercased 2-letter code.
+    private var compactLanguageCode: String {
+        if transcriptionLanguage == "auto" { return "🌐" }
+        return transcriptionLanguage.prefix(2).uppercased()
+    }
+
+    /// Full human-readable name of the currently selected model, used
+    /// in the brain-chip tooltip ("Active model: Medium — tap to switch").
+    private var activeModelName: String {
+        guard !selectedModel.isEmpty,
+            let model = AIModel.availableModels.first(where: { $0.variant == selectedModel })
+        else { return "none" }
+        return model.name
+    }
+
     private var spokenLanguageHelpText: String {
         if transcriptionLanguage == "auto" {
             return "Spoken language hint: Auto-detect. SpeakType will try to detect the language you are speaking."
@@ -78,8 +94,8 @@ struct MiniRecorderView: View {
         // any future bug upstream that produces a value outside that
         // range would push sqrt() to NaN/oversize and break the visual.
         let level = min(1.0, max(0.0, CGFloat(audioRecorder.audioLevel)))
-        let baseHeight: CGFloat = 4
-        let maxHeight: CGFloat = 28
+        let baseHeight: CGFloat = 2
+        let maxHeight: CGFloat = 16
 
         let waveOffset = sin(CGFloat(index) * 0.5 + phase) * 0.3
         let audioMultiplier = sqrt(level) * (0.8 + waveOffset)
@@ -97,99 +113,100 @@ struct MiniRecorderView: View {
             backgroundView
 
             if viewModel.isWarmingUp || whisperService.isLoading {
-                HStack(spacing: 8) {
+                HStack(spacing: 4) {
                     ProgressView()
-                        .controlSize(.small)
+                        .controlSize(.mini)
                         .colorScheme(.dark)
-                    Text("Warming up model...")
-                        .font(Typography.labelMedium)
+                    Text("Warming up…")
+                        .font(.system(size: 9, weight: .medium))
                         .foregroundColor(.white.opacity(0.9))
+                        .lineLimit(1)
                 }
                 .transition(.opacity)
             } else if viewModel.isProcessing {
                 Text(viewModel.statusMessage)
-                    .font(Typography.labelMedium)
+                    .font(.system(size: 9, weight: .medium))
                     .foregroundColor(.white)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.horizontal, 8)
                     .transition(.opacity)
             } else {
-                HStack(spacing: 12) {
+                HStack(spacing: 4) {
                     stopButton
 
-                    // Waveform - bar visualizer style
-                    HStack(spacing: 3) {
-                        ForEach(0..<15) { index in
-                            RoundedRectangle(cornerRadius: 2)
+                    // Waveform — 11 bars at 3pt, stretched to fill the
+                    // horizontal space left after button + model chip.
+                    HStack(spacing: 2) {
+                        ForEach(0..<11) { index in
+                            RoundedRectangle(cornerRadius: 1)
                                 .fill(Color.white.opacity(0.7))
                                 .frame(width: 3, height: barHeight(for: index))
                                 .animation(
                                     .easeInOut(duration: 0.15), value: audioRecorder.audioLevel)
                         }
                     }
-                    .frame(height: 30)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 18)
 
-                    HStack(spacing: 8) {
-                        Menu {
-                            Button("Auto-detect") { setLanguage("auto") }
-
-                            if !quickLanguageCodes.isEmpty {
-                                Divider()
-                                ForEach(quickLanguageCodes, id: \.self) { code in
-                                    if let lang = GeneralSettingsTab.whisperLanguages.first(where: {
-                                        $0.code == code
-                                    }) {
-                                        Button(lang.name) { setLanguage(code) }
-                                    }
-                                }
-                            }
-
-                            Divider()
-                            Menu("More languages") {
-                                ForEach(GeneralSettingsTab.whisperLanguages, id: \.code) { lang in
-                                    Button(lang.name) { setLanguage(lang.code) }
-                                }
-                            }
-
-                            if !recentLanguageCodes.isEmpty {
-                                Divider()
-                                Button("Clear recents") { recentLanguagesString = "" }
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Text(currentLanguageLabel)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.92))
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-
-                                DoubleChevronIcon(color: .white.opacity(0.92))
-                            }
-                            .frame(maxWidth: 74, alignment: .leading)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.white.opacity(0.15))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    // Compact model chip — brain SF Symbol. Tap opens the
+                    // full model menu; language selection moved into the
+                    // right-click context menu.
+                    Menu {
+                        modelSelectionMenu
+                    } label: {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.white.opacity(0.28))
+                            Image(systemName: "gearshape.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .symbolRenderingMode(.monochrome)
+                                .foregroundStyle(.white)
                         }
-                        .menuIndicator(.hidden)
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                        .help(spokenLanguageHelpText)
-
-                        // Recording mode indicator
-                        Image(systemName: recordingMode == 0 ? "hand.tap.fill" : "repeat.1")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.7))
-                            .help(recordingMode == 0 ? "Hold to Record" : "Toggle to Record")
+                        .frame(width: 22, height: 22)
                     }
+                    .menuIndicator(.hidden)
+                    .menuStyle(.borderlessButton)
+                    .tint(.white)
+                    .fixedSize()
+                    .help("Active model: \(activeModelName) — tap to switch")
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 4)
                 .transition(.opacity)
             }
         }
-        .frame(width: 260, height: 50)
-        .clipShape(RoundedRectangle(cornerRadius: 25))
-        .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 2)
+        .frame(width: 140, height: 30)
+        .clipShape(RoundedRectangle(cornerRadius: 15))
+        .shadow(color: .black.opacity(0.25), radius: 5, x: 0, y: 1)
         .contextMenu {
-            modelSelectionMenu
+            Menu("Language") {
+                Button("Auto-detect") { setLanguage("auto") }
+                if !quickLanguageCodes.isEmpty {
+                    Divider()
+                    ForEach(quickLanguageCodes, id: \.self) { code in
+                        if let lang = GeneralSettingsTab.whisperLanguages.first(where: {
+                            $0.code == code
+                        }) {
+                            Button(lang.name) { setLanguage(code) }
+                        }
+                    }
+                }
+                Divider()
+                Menu("More languages") {
+                    ForEach(GeneralSettingsTab.whisperLanguages, id: \.code) { lang in
+                        Button(lang.name) { setLanguage(lang.code) }
+                    }
+                }
+                if !recentLanguageCodes.isEmpty {
+                    Divider()
+                    Button("Clear recents") { recentLanguagesString = "" }
+                }
+            }
+            Divider()
+            Menu("Recording mode") {
+                Button("Hold to record") { recordingMode = 0 }
+                Button("Toggle to record") { recordingMode = 1 }
+            }
         }
         .onChange(of: viewModel.pendingAction) { _, _ in
             // Drain the VM's action queue. SwiftUI guarantees this fires
@@ -247,17 +264,16 @@ struct MiniRecorderView: View {
 
     private var stopButton: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10)  // Squircle
-                .fill(Color(red: 1.0, green: 0.2, blue: 0.2))  // Bright Red
-                .frame(width: 32, height: 32)  // Smaller button
-                .shadow(color: Color.red.opacity(0.4), radius: 4, x: 0, y: 0)
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color(red: 1.0, green: 0.2, blue: 0.2))
+                .frame(width: 20, height: 20)
+                .shadow(color: Color.red.opacity(0.4), radius: 2, x: 0, y: 0)
 
-            // Inner square icon
-            RoundedRectangle(cornerRadius: 3)
+            RoundedRectangle(cornerRadius: 2)
                 .fill(Color.black.opacity(0.4))
-                .frame(width: 10, height: 10)
+                .frame(width: 6, height: 6)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(RoundedRectangle(cornerRadius: 6))
         .onTapGesture {
             handleHotkeyTrigger()
         }
@@ -265,15 +281,13 @@ struct MiniRecorderView: View {
 
     private var backgroundView: some View {
         ZStack {
-            // Dark background with blur, all clipped to capsule
-            VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow, cornerRadius: 25)
-                .clipShape(RoundedRectangle(cornerRadius: 25))
+            VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow, cornerRadius: 15)
+                .clipShape(RoundedRectangle(cornerRadius: 15))
 
-            RoundedRectangle(cornerRadius: 25)
+            RoundedRectangle(cornerRadius: 15)
                 .fill(Color.black.opacity(0.85))
 
-            // Subtle border
-            RoundedRectangle(cornerRadius: 25)
+            RoundedRectangle(cornerRadius: 15)
                 .stroke(Color.white.opacity(0.1), lineWidth: 1)
         }
     }

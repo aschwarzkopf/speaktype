@@ -69,7 +69,7 @@ class MiniRecorderWindowController: NSObject {
 
             if let screen = NSScreen.main {
                 let visibleFrame = screen.visibleFrame
-                let windowWidth: CGFloat = 260
+                let windowWidth: CGFloat = 140
                 let x = visibleFrame.midX - (windowWidth / 2)
                 let y = visibleFrame.minY + 50
                 panel.setFrameOrigin(NSPoint(x: x, y: y))
@@ -105,7 +105,7 @@ class MiniRecorderWindowController: NSObject {
         hostingController = NSHostingController(rootView: AnyView(recorderView))
 
         let p = KeyableMiniRecorderPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 260, height: 50),
+            contentRect: NSRect(x: 0, y: 0, width: 140, height: 30),
             styleMask: [.nonactivatingPanel, .fullSizeContentView, .borderless],
             backing: .buffered,
             defer: false
