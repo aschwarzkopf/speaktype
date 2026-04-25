@@ -35,6 +35,8 @@ struct SettingsView: View {
                 GeneralSettingsTab()
             case .audio:
                 AudioSettingsTab()
+            case .cleanup:
+                CleanupSettingsTab()
             case .permissions:
                 PermissionsSettingsTab()
             }
@@ -46,6 +48,7 @@ struct SettingsView: View {
 enum SettingsTab: String, CaseIterable, Identifiable {
     case general = "General"
     case audio = "Audio"
+    case cleanup = "Cleanup"
     case permissions = "Permissions"
 
     var id: String { rawValue }
@@ -54,6 +57,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape"
         case .audio: return "mic"
+        case .cleanup: return "wand.and.stars"
         case .permissions: return "shield"
         }
     }
