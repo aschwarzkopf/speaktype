@@ -16,13 +16,23 @@ final class PolisherFactoryTests: XCTestCase {
             "CleanupMode.off must always route to IdentityPolisher.")
     }
 
-    func testLocalReturnsIdentityPolisherInPhase1() {
-        // Phase 2 will replace this with FoundationModelsPolisher. Until
-        // then, .local is a safe no-op so the rail can be wired through
-        // processRecording without changing behavior.
+    @MainActor
+    func testLocalRoutesToFoundationModelsWhenAvailableOtherwiseIdentity() {
+        // Phase 2 contract: on macOS 26 with Apple Intelligence enabled,
+        // `.local` resolves to FoundationModelsPolisher. On older macOS
+        // or AI-disabled hosts, it falls back to IdentityPolisher so
+        // the app still runs cleanly without local cleanup.
         let polisher = PolisherFactory.make(mode: .local)
+
+        #if canImport(FoundationModels)
+        if #available(macOS 26, *), FoundationModelsPolisher.isAvailable {
+            XCTAssertTrue(polisher is FoundationModelsPolisher,
+                "On macOS 26 with AI ready, .local must return FoundationModelsPolisher.")
+            return
+        }
+        #endif
         XCTAssertTrue(polisher is IdentityPolisher,
-            "Phase 1 placeholder — Phase 2 replaces this with FoundationModelsPolisher.")
+            "Without Apple Intelligence available, .local falls back to IdentityPolisher.")
     }
 
     func testCloudReturnsIdentityPolisherInPhase1() {

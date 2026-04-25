@@ -24,9 +24,21 @@ enum CleanupMode: String, CaseIterable {
 enum PolisherFactory {
     static func make(mode: CleanupMode) -> TranscriptPolisher {
         switch mode {
-        case .off:   return IdentityPolisher()
-        case .local: return IdentityPolisher()  // Phase 2: FoundationModelsPolisher
-        case .cloud: return IdentityPolisher()  // Phase 3: ClaudePolisher
+        case .off:
+            return IdentityPolisher()
+        case .local:
+            #if canImport(FoundationModels)
+            if #available(macOS 26, *), FoundationModelsPolisher.isAvailable {
+                return FoundationModelsPolisher()
+            }
+            #endif
+            // Apple Intelligence not present / eligible — fall back to
+            // pass-through. Phase 4 surfaces this state in the UI as a
+            // disabled "Local" row with an explainer popover; for now
+            // we just hand back IdentityPolisher silently.
+            return IdentityPolisher()
+        case .cloud:
+            return IdentityPolisher()  // Phase 3: ClaudePolisher
         }
     }
 }
