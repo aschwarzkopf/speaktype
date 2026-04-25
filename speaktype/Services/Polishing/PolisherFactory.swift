@@ -38,7 +38,14 @@ enum PolisherFactory {
             // we just hand back IdentityPolisher silently.
             return IdentityPolisher()
         case .cloud:
-            return IdentityPolisher()  // Phase 3: ClaudePolisher
+            // Cloud requires a user-supplied API key. If none is stored
+            // (user selected Cloud but hasn't entered a key yet), fall
+            // back to pass-through so dictation still works — the UI
+            // will surface the missing-key state separately.
+            if let apiKey = ClaudeAPIKeyStore.shared.load(), !apiKey.isEmpty {
+                return ClaudePolisher(apiKey: apiKey)
+            }
+            return IdentityPolisher()
         }
     }
 }
