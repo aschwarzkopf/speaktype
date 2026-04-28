@@ -40,8 +40,17 @@ jobs:
         id: version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          # Sparkle's <sparkle:version> must equal the running app's
+          # CFBundleVersion (build number) — pull it from project.pbxproj.
+          BUILD=$(grep -m1 'CURRENT_PROJECT_VERSION = ' speaktype.xcodeproj/project.pbxproj \
+                    | sed -E 's/.*CURRENT_PROJECT_VERSION = ([0-9]+).*/\1/')
+          if [[ -z "$BUILD" ]]; then
+            echo "❌ Could not extract CURRENT_PROJECT_VERSION from project.pbxproj" >&2
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building SpeakType $VERSION"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "Building SpeakType $VERSION (build $BUILD)"
 
       - name: Build (Release, ad-hoc signed)
         run: |
@@ -124,6 +133,7 @@ jobs:
         run: |
           ./scripts/update-appcast.sh \
             "${{ steps.version.outputs.version }}" \
+            "${{ steps.version.outputs.build }}" \
             "${{ steps.package.outputs.zip }}" \
             "${{ steps.package.outputs.size }}" \
             '${{ steps.sign.outputs.sign_output }}'

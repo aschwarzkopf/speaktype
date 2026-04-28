@@ -2,18 +2,27 @@
 # Inserts a new <item> entry at the top of docs/appcast.xml. Called from
 # the GitHub Actions release workflow after the ZIP is built and signed.
 #
-# Usage: update-appcast.sh <version> <zip_filename> <byte_length> <sign_update_output>
+# Usage: update-appcast.sh <marketing_version> <build_number> <zip_filename> <byte_length> <sign_update_output>
 #
 # `sign_update` outputs a string like:
 #   sparkle:edSignature="abc..." length="123"
 # We extract the sparkle:edSignature attribute from it.
+#
+# IMPORTANT: Sparkle's update comparison is driven by <sparkle:version>,
+# which must match the running app's CFBundleVersion (the integer build
+# number). Putting the marketing string "1.0.30" in <sparkle:version>
+# causes Sparkle's tuple comparator to return "no update" against build
+# numbers like "21" (since 21 > 1).
+#   <sparkle:version>             ← CFBundleVersion (build number, e.g. 22)
+#   <sparkle:shortVersionString>  ← CFBundleShortVersionString (marketing, e.g. 1.0.30)
 
 set -euo pipefail
 
-VERSION="${1:?version required, e.g. 1.0.30}"
-ZIP_NAME="${2:?zip filename required}"
-SIZE="${3:?byte length required}"
-SIGN_OUTPUT="${4:?sign_update output required}"
+VERSION="${1:?marketing version required, e.g. 1.0.30}"
+BUILD="${2:?build number required, e.g. 22}"
+ZIP_NAME="${3:?zip filename required}"
+SIZE="${4:?byte length required}"
+SIGN_OUTPUT="${5:?sign_update output required}"
 
 REPO_OWNER="${REPO_OWNER:-aschwarzkopf}"
 REPO_NAME="${REPO_NAME:-speaktype}"
@@ -33,7 +42,7 @@ NEW_ITEM=$(cat <<EOF
     <item>
       <title>Version ${VERSION}</title>
       <pubDate>${PUB_DATE}</pubDate>
-      <sparkle:version>${VERSION}</sparkle:version>
+      <sparkle:version>${BUILD}</sparkle:version>
       <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>${MIN_MACOS}</sparkle:minimumSystemVersion>
       <enclosure
