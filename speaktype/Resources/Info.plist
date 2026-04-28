@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>SpeakType</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -12,39 +14,44 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
-	<key>CFBundleDisplayName</key>
-	<string>SpeakType</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.karansinghgit.speaktype</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>speaktype</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>com.karansinghgit.speaktype</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>speaktype</string>
-            </array>
-        </dict>
-    </array>
 	<key>LSUIElement</key>
 	<false/>
-
-	<key>NSMicrophoneUsageDescription</key>
-	<string>SpeakType needs access to your microphone to record your voice for transcription. All processing is done locally on your device.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>SpeakType needs permission to send keystrokes to paste transcribed text into the active application.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SpeakType needs access to your microphone to record your voice for transcription. All processing is done locally on your device.</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<true/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
-	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.productivity</string>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://aschwarzkopf.github.io/speaktype/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>2EHqZ3sEV63XZzt+rwwZrRuGZozjBAeAc+v7uOVw8UA=</string>
 </dict>
 </plist>

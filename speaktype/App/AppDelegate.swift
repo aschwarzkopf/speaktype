@@ -55,6 +55,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         checkForUpdatesOnLaunch()
 
+        // Bring up Sparkle. It reads SUFeedURL + SUPublicEDKey from
+        // Info.plist and starts scheduling background checks on its
+        // own. Coexists with the legacy UpdateService for now —
+        // follow-up work routes the manual "Check for Updates…" UI
+        // through SparkleUpdater and removes UpdateService's
+        // download/install path.
+        SparkleUpdater.shared.start()
+
         UpdateService.shared.showUpdateWindowPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
