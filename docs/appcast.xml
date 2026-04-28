@@ -7,6 +7,18 @@
     <language>en</language>
     <item>
       <title>Version 1.0.30</title>
+      <pubDate>Tue, 28 Apr 2026 14:04:02 +0000</pubDate>
+      <sparkle:version>22</sparkle:version>
+      <sparkle:shortVersionString>1.0.30</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <enclosure
+        url="https://github.com/aschwarzkopf/speaktype/releases/download/v1.0.30/SpeakType-1.0.30.zip"
+        length="33554641"
+        type="application/octet-stream"
+        sparkle:edSignature="c1//cq9YxzezIbaQp7WzwYfhgKRmc0XaYvnzgfuZdhjNqbTHltHQu7WefHl+mhbWXgeW5p3nGuhkEUAqVg7iDA==" />
+    </item>
+    <item>
+      <title>Version 1.0.30</title>
       <pubDate>Tue, 28 Apr 2026 02:02:42 +0000</pubDate>
       <sparkle:version>22</sparkle:version>
       <sparkle:shortVersionString>1.0.30</sparkle:shortVersionString>
