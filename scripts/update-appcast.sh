@@ -52,11 +52,21 @@ if [[ ! -f "$APPCAST" ]]; then
 fi
 
 # Insert the new item directly after the <language> tag so latest is at top.
+# BSD awk (macOS default) rejects newlines in -v values, so we read the new
+# block from a file via getline instead of passing it as a variable.
+ITEM_FILE=$(mktemp)
+printf '%s\n' "$NEW_ITEM" > "$ITEM_FILE"
 TMP=$(mktemp)
-awk -v new="$NEW_ITEM" '
-  /<language>en<\/language>/ { print; print new; next }
+awk -v itemfile="$ITEM_FILE" '
+  /<language>en<\/language>/ {
+    print
+    while ((getline line < itemfile) > 0) print line
+    close(itemfile)
+    next
+  }
   { print }
 ' "$APPCAST" > "$TMP"
 mv "$TMP" "$APPCAST"
+rm -f "$ITEM_FILE"
 
 echo "✅ Appended v${VERSION} to ${APPCAST}"
