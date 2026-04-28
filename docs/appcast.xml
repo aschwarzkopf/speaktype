@@ -5,5 +5,17 @@
     <link>https://aschwarzkopf.github.io/speaktype/appcast.xml</link>
     <description>Auto-update feed for SpeakType.</description>
     <language>en</language>
+    <item>
+      <title>Version 1.0.30</title>
+      <pubDate>Tue, 28 Apr 2026 02:02:42 +0000</pubDate>
+      <sparkle:version>1.0.30</sparkle:version>
+      <sparkle:shortVersionString>1.0.30</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <enclosure
+        url="https://github.com/aschwarzkopf/speaktype/releases/download/v1.0.30/SpeakType-1.0.30.zip"
+        length="33544482"
+        type="application/octet-stream"
+        sparkle:edSignature="fWTJRB+Hp9+4zPYFDEXJ+owBsmMQwHnw+waheM00AeJR+6tljpd8r5gvSf+m/nSMZSrMi40aEyTTkAwHAqKkAw==" />
+    </item>
   </channel>
 </rss>
