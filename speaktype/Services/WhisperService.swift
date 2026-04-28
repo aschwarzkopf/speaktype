@@ -45,6 +45,53 @@ class WhisperService {
         return #"[\[\(]\s*(?:"# + escaped + #")\s*[\]\)]"#
     }()
 
+    /// Phrases Whisper hallucinates on silent or trailing-silence audio.
+    /// Sourced from training-data biases — Whisper's corpus had heavy
+    /// YouTube content with these closing phrases, plus phrases
+    /// catalogued in openai/whisper issues #928, #1783 and the
+    /// transformers PR #27658 hallucination list.
+    ///
+    /// Match strategy:
+    ///   - Standalone (whole transcript ≈ phrase): return ""
+    ///   - Trailing (phrase at the end + ≥5 substantive words before):
+    ///     strip the trailing phrase and keep the prefix
+    /// Mid-sentence appearances are preserved (user might literally
+    /// say "thank you" as part of normal speech).
+    ///
+    /// Listed longest-first so regex alternation prefers specific
+    /// matches over generic ones (e.g. "thank you for watching"
+    /// before "thank you").
+    private static let hallucinationPhrases: [String] = [
+        "thank you so much for watching",
+        "thank you for watching",
+        "thanks for watching",
+        "thank you for listening",
+        "thanks for listening",
+        "thank you very much",
+        "i'll see you next time",
+        "see you in the next video",
+        "see you next time",
+        "see you later",
+        "thank you",
+        "thanks",
+        "please subscribe",
+        "like and subscribe",
+        "don't forget to subscribe",
+        "subscribe to my channel",
+        "bye bye",
+        "bye-bye",
+        "goodbye",
+        "bye",
+        "you",
+    ]
+
+    /// Minimum substantive words before a trailing hallucination for us
+    /// to confidently strip it. Below this threshold we leave the text
+    /// alone — the prefix isn't long enough to disambiguate "real
+    /// transcript with a trailing 'thanks'" from "all-hallucination
+    /// short utterance."
+    private static let minPrefixWordsForTrailingStrip = 5
+
     var pipe: WhisperKit?
     var isInitialized = false
     var isTranscribing = false
@@ -239,6 +286,25 @@ class WhisperService {
         var options = DecodingOptions()
         options.task = .transcribe
         options.language = (language == "auto") ? nil : language
+
+        // VAD-based chunking. WhisperKit segments the audio by
+        // detected voice activity and only feeds non-silent regions
+        // to the model. This is the highest-leverage anti-hallucination
+        // fix — Whisper never sees the trailing silence that triggers
+        // "Thanks for watching" / "Thank you" because VAD trims it
+        // before transcription. Recommended by faster-whisper docs,
+        // whisper.cpp PR #2589, and openai/whisper issue #928.
+        options.chunkingStrategy = .vad
+
+        // Hallucination-suppression thresholds — slight tightening of
+        // OpenAI defaults (0.6 / -1.0 / 2.4). Community guidance
+        // (faster-whisper README, openai/whisper #928) is that defaults
+        // are deliberate; aggressive tightening drops real quiet speech
+        // too. We nudge noSpeech and logProb slightly tighter, leave
+        // compressionRatio at default.
+        options.noSpeechThreshold = 0.55
+        options.logProbThreshold = -0.8
+        options.compressionRatioThreshold = 2.4
         return options
     }
 
@@ -265,6 +331,81 @@ class WhisperService {
             options: .regularExpression
         )
 
-        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Step 1: standalone hallucination check. If the entire
+        // transcript matches a known phrase (after stripping trailing
+        // punctuation and whitespace), return empty — downstream
+        // processRecording's `guard !text.isEmpty` then suppresses the
+        // commit and treats it as "no speech detected."
+        if isStandaloneHallucination(normalized) {
+            return ""
+        }
+
+        // Step 2: trailing hallucination. If the very end of the
+        // transcript is a known phrase AND the preceding content is
+        // substantial (≥ 5 words), strip just the trailing phrase
+        // while keeping the real content. Catches the common pattern
+        // "<real speech>. Thank you." on recordings that fade into
+        // silence.
+        return strippingTrailingHallucination(normalized)
+    }
+
+    /// Compare-friendly form of a transcript: lowercase, strip leading
+    /// and trailing whitespace + punctuation, collapse internal
+    /// whitespace. Internal apostrophes are preserved so contractions
+    /// like "don't" still match.
+    private static func canonicalForm(_ text: String) -> String {
+        let trimChars = CharacterSet.whitespacesAndNewlines.union(
+            CharacterSet(charactersIn: ".,!?;:…\"'`-—")
+        )
+        return text
+            .lowercased()
+            .trimmingCharacters(in: trimChars)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+    }
+
+    private static func isStandaloneHallucination(_ text: String) -> Bool {
+        let canonical = canonicalForm(text)
+        if canonical.isEmpty { return true }
+        return hallucinationPhrases.contains(canonical)
+    }
+
+    private static func strippingTrailingHallucination(_ text: String) -> String {
+        // Try each phrase against the trailing portion, longest first
+        // (already sorted that way in `hallucinationPhrases`).
+        for phrase in hallucinationPhrases {
+            // Pattern: optional terminator before the phrase, the phrase
+            // itself, optional trailing punctuation+whitespace, end.
+            let pattern = #"[.!?,]?\s+"# + NSRegularExpression.escapedPattern(for: phrase)
+                + #"\s*[.!?,…]*\s*$"#
+            guard let regex = try? NSRegularExpression(
+                pattern: pattern,
+                options: [.caseInsensitive]
+            ) else { continue }
+
+            let nsText = text as NSString
+            let fullRange = NSRange(location: 0, length: nsText.length)
+            guard let match = regex.firstMatch(in: text, range: fullRange),
+                match.range.length > 0
+            else { continue }
+
+            let prefix = nsText.substring(to: match.range.location)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let prefixWordCount = prefix
+                .split(whereSeparator: { $0.isWhitespace })
+                .count
+
+            // Only strip if the prefix is substantial enough to
+            // confidently classify the trailing phrase as hallucination
+            // rather than the entire utterance.
+            if prefixWordCount >= minPrefixWordsForTrailingStrip {
+                return prefix
+            }
+            // First (longest) phrase matched but prefix was too short —
+            // don't try shorter phrases on the same text (would over-cut).
+            return text
+        }
+        return text
     }
 }

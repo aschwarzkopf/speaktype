@@ -55,6 +55,93 @@ final class WhisperServiceTests: XCTestCase {
         XCTAssertEqual(normalized, "")
     }
 
+    // MARK: - Whisper end-of-audio hallucination filtering
+    // Whisper trained heavily on YouTube videos with closing phrases
+    // ("Thanks for watching", "Please subscribe", etc.) and reproduces
+    // them on silent / trailing-silence audio. Filter the standalone
+    // case to empty (signals "no speech" downstream) and strip the
+    // trailing case when there's substantive content before it.
+
+    // Standalone hallucinations → empty
+
+    func testStandaloneThankYouReturnsEmpty() {
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "Thank you."), "")
+    }
+
+    func testStandaloneThanksReturnsEmpty() {
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "Thanks"), "")
+    }
+
+    func testStandaloneSubscribeReturnsEmpty() {
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "Please subscribe."), "")
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "Like and subscribe"), "")
+    }
+
+    func testStandaloneSeeYouNextTimeReturnsEmpty() {
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "See you next time."), "")
+    }
+
+    func testStandaloneByeReturnsEmpty() {
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "Bye-bye"), "")
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "Goodbye."), "")
+    }
+
+    func testJustPunctuationReturnsEmpty() {
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "."), "")
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "..."), "")
+    }
+
+    // Trailing hallucinations with substantive content → strip the trailing
+
+    func testTrailingThankYouStrippedWhenContentBefore() {
+        let raw = "We discussed the project timeline and next steps for the launch. Thank you."
+        let cleaned = WhisperService.normalizedTranscription(from: raw)
+        XCTAssertFalse(cleaned.lowercased().hasSuffix("thank you."),
+            "Trailing 'Thank you.' must be stripped when there's real content before it.")
+        XCTAssertTrue(cleaned.lowercased().contains("project timeline"),
+            "Substantive content before the hallucination must be preserved.")
+    }
+
+    func testTrailingSubscribeStrippedWhenContentBefore() {
+        let raw = "I went over the budget items and reviewed the new hire pipeline. Please subscribe."
+        let cleaned = WhisperService.normalizedTranscription(from: raw)
+        XCTAssertFalse(cleaned.lowercased().contains("subscribe"))
+    }
+
+    // Negative cases — must NOT strip legitimate uses
+
+    func testLegitimateThanksMidSentencePreserved() {
+        // "Thank you" used as part of natural speech — has substantive
+        // content AFTER the phrase, so it's not at the trailing position.
+        let raw = "I told her thank you for the help with the parking pass"
+        let cleaned = WhisperService.normalizedTranscription(from: raw)
+        XCTAssertEqual(cleaned, raw,
+            "'Thank you' embedded in normal speech must survive — it's only " +
+            "stripped at the very end of the transcript.")
+    }
+
+    func testLegitimateThanksAtEndPreservedWhenShortPrefix() {
+        // Very short prefix means we can't safely classify the trailing
+        // phrase as hallucination. Better to keep it than risk cutting
+        // legitimate content. (User: "Hi! Thanks.")
+        let raw = "Hi! Thanks."
+        let cleaned = WhisperService.normalizedTranscription(from: raw)
+        XCTAssertTrue(cleaned.lowercased().contains("thanks"),
+            "Don't strip trailing 'Thanks' when prefix is too short to confidently " +
+            "classify as hallucination.")
+    }
+
+    func testNormalTranscriptUnchanged() {
+        let raw = "We covered the agenda items and assigned action items to each team lead"
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: raw), raw)
+    }
+
+    func testCaseInsensitiveMatching() {
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "thank you"), "")
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "THANK YOU"), "")
+        XCTAssertEqual(WhisperService.normalizedTranscription(from: "Thank You."), "")
+    }
+
     // MARK: - Medium #9: Task cancellation hygiene
     // Post-fix contract: loadModel honors cooperative cancellation. A
     // task that is cancelled before loadModel reaches its first await
