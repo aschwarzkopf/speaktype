@@ -1,0 +1,151 @@
+name: Release
+
+# Trigger on every tag push of the form v1.2.3. Push the tag and the
+# workflow handles the rest: build → sign with Sparkle EdDSA →
+# generate appcast entry → upload ZIP to GitHub Releases →
+# commit appcast back to main so GitHub Pages serves it.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create the GitHub Release + push appcast.xml
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # for git history & tag message
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Cache Swift Package dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData/SourcePackages
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('speaktype.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building SpeakType $VERSION"
+
+      - name: Build (Release, ad-hoc signed)
+        run: |
+          xcodebuild \
+            -project speaktype.xcodeproj \
+            -scheme speaktype \
+            -configuration Release \
+            -derivedDataPath build \
+            MARKETING_VERSION=${{ steps.version.outputs.version }} \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="" \
+            ENABLE_HARDENED_RUNTIME=NO \
+            build \
+            | xcpretty --simple --no-utf || (echo "::warning::xcpretty not available — raw log follows"; xcodebuild -project speaktype.xcodeproj -scheme speaktype -configuration Release -derivedDataPath build MARKETING_VERSION=${{ steps.version.outputs.version }} CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" ENABLE_HARDENED_RUNTIME=NO build)
+
+      - name: Package as ZIP
+        id: package
+        run: |
+          APP="build/Build/Products/Release/speaktype.app"
+          if [[ ! -d "$APP" ]]; then
+            echo "❌ Build output missing: $APP" >&2
+            find build/Build/Products -name "*.app" -type d
+            exit 1
+          fi
+          ZIP="SpeakType-${{ steps.version.outputs.version }}.zip"
+          # `ditto -c -k --sequesterRsrc --keepParent` is the canonical
+          # macOS-aware zip — preserves resource forks and bundle structure
+          # in a way `zip` won't. Sparkle expects this exact format.
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+          SIZE=$(stat -f %z "$ZIP")
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "Packaged $ZIP — $SIZE bytes"
+
+      - name: Download Sparkle CLI tools
+        run: |
+          # Sparkle's own GitHub release is properly signed/notarized,
+          # unlike the Homebrew cask which has been deprecated for
+          # failing Gatekeeper. Download direct to avoid CI-runner
+          # quarantine headaches.
+          SPARKLE_VERSION=2.6.4
+          curl -fsSL -o /tmp/Sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+          mkdir -p /tmp/sparkle
+          tar -xf /tmp/Sparkle.tar.xz -C /tmp/sparkle
+          ls /tmp/sparkle/bin/
+          echo "/tmp/sparkle/bin" >> "$GITHUB_PATH"
+
+      - name: Sign update with EdDSA
+        id: sign
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+            echo "❌ SPARKLE_PRIVATE_KEY secret is not set." >&2
+            echo "Run: gh secret set SPARKLE_PRIVATE_KEY" >&2
+            exit 1
+          fi
+          KEY_FILE=$(mktemp)
+          # Strip any accidental trailing whitespace / newlines that the
+          # GitHub UI tends to add when pasting a secret.
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | tr -d '\n' > "$KEY_FILE"
+
+          SIG_OUTPUT=$(/tmp/sparkle/bin/sign_update -f "$KEY_FILE" "${{ steps.package.outputs.zip }}")
+          rm "$KEY_FILE"
+
+          # sign_update prints to stdout; capture verbatim for the
+          # appcast generator. Format:
+          #   sparkle:edSignature="..." length="..."
+          echo "Signature output: $SIG_OUTPUT"
+          # Base64-encode through GITHUB_OUTPUT to avoid quoting issues.
+          {
+            echo 'sign_output<<SIGEOF'
+            echo "$SIG_OUTPUT"
+            echo 'SIGEOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update appcast.xml
+        run: |
+          ./scripts/update-appcast.sh \
+            "${{ steps.version.outputs.version }}" \
+            "${{ steps.package.outputs.zip }}" \
+            "${{ steps.package.outputs.size }}" \
+            '${{ steps.sign.outputs.sign_output }}'
+          echo "--- appcast.xml head ---"
+          head -30 docs/appcast.xml
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.zip }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+      - name: Commit appcast.xml back to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/appcast.xml
+          if git diff --cached --quiet; then
+            echo "No appcast changes to commit (already up to date?)"
+          else
+            git commit -m "release: appcast for v${{ steps.version.outputs.version }}"
+            git push origin HEAD:main
+          fi
