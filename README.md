@@ -20,11 +20,12 @@
 
 ## What is SpeakType?
 
-SpeakType is a **privacy-first, offline voice dictation tool** for macOS. Unlike online dictation services, everything runs **100% locally** using OpenAI's Whisper AI model via [WhisperKit](https://github.com/argmaxinc/WhisperKit). Support for Parakeet coming soon!
+SpeakType is a **privacy-first, offline voice dictation tool** for macOS. Unlike online dictation services, the core dictation pipeline runs **100% locally** using OpenAI's Whisper AI model via [WhisperKit](https://github.com/argmaxinc/WhisperKit). Support for Parakeet coming soon!
 
-- **Privacy First** - Zero data leaves your Mac
+- **Privacy First** - Whisper runs locally; nothing leaves your Mac unless you explicitly opt into Cloud cleanup
 - **Lightning Fast** - Optimized for Apple Silicon
 - **Works Everywhere** - Any app, any text field
+- **Optional Cleanup** - Remove filler words and fix punctuation via on-device Apple Intelligence (free) or Anthropic Claude (BYOK)
 - **Open Source** - Audit every line of code yourself
 
 ---
@@ -33,9 +34,10 @@ SpeakType is a **privacy-first, offline voice dictation tool** for macOS. Unlike
 
 ### Requirements
 
-- macOS 13.0+ (Ventura or newer)
+- macOS 14.0+ (Sonoma or newer)
 - Apple Silicon (M1+) recommended
 - 2GB available storage (for AI models)
+- macOS 26+ with Apple Intelligence enabled — optional, only required for the on-device "Local" cleanup mode
 
 ### Download
 
@@ -43,8 +45,9 @@ SpeakType is a **privacy-first, offline voice dictation tool** for macOS. Unlike
 
 1. Download `SpeakType.dmg`
 2. Drag **SpeakType** to **Applications**
-3. Grant Microphone + Accessibility + Documents Folder permissions
-4. Download an AI model from Settings → AI Models
+3. Grant **Microphone** and **Accessibility** permissions when prompted
+4. Set **System Settings → Keyboard → "Press 🌐 key to" → Do Nothing** so macOS doesn't open the emoji picker on Fn press
+5. Download an AI model from Settings → AI Models
 
 Press `fn` to start dictating.
 
@@ -113,9 +116,13 @@ speaktype/
 ### Tech Stack
 
 - **Swift 5.9+** / SwiftUI + AppKit
-- **[WhisperKit](https://github.com/argmaxinc/WhisperKit)** - Local Whisper inference
+- **[WhisperKit](https://github.com/argmaxinc/WhisperKit)** - Local Whisper inference (Neural Engine, GPU-accelerated)
 - **[KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts)** - Global hotkeys
-- **AVFoundation** - Audio capture
+- **AVFoundation** - Audio capture (`AVCaptureSession` with forced Float32 output for level-meter consistency across devices)
+- **CoreAudio** - System default-input device tracking via `kAudioHardwarePropertyDefaultInputDevice` listener (no AVFoundation equivalent on macOS)
+- **FoundationModels** *(macOS 26+, optional)* - On-device Apple Intelligence for "Local" transcript cleanup
+- **Anthropic Claude API** *(optional, BYOK)* - Cloud transcript cleanup; key stored in macOS Keychain
+- **NDJSON file persistence** - History stored at `~/Library/Application Support/SpeakType/history.ndjson` (survives SIGKILL via atomic rewrites)
 
 ---
 
