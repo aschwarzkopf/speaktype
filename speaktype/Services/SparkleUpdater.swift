@@ -20,10 +20,8 @@ import Sparkle
 /// `SUEnableAutomaticChecks` / `SUAutomaticallyUpdate` Info.plist
 /// values.
 ///
-/// Coexists with the legacy `UpdateService` for now. Follow-up work
-/// will route the legacy "Check for Updates" UI through this facade
-/// and remove `UpdateService.installUpdate` (which reimplements
-/// download + verify + install — all of which Sparkle does better).
+/// SettingsView's "Check for Updates" button calls
+/// `checkForUpdates()` on this facade; everything else is automatic.
 @MainActor
 final class SparkleUpdater: NSObject, ObservableObject {
     static let shared = SparkleUpdater()

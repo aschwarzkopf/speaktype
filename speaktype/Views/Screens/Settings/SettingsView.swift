@@ -90,7 +90,12 @@ struct SettingsTabButton: View {
 
 struct GeneralSettingsTab: View {
     @AppStorage("appTheme") private var appTheme: AppTheme = .system
-    @AppStorage("autoUpdate") private var autoUpdate = true
+    // Note: the legacy `autoUpdate` @AppStorage key is no longer read —
+    // Sparkle's automatic-check schedule is governed by Info.plist's
+    // SUEnableAutomaticChecks / SUAutomaticallyUpdate keys plus
+    // Sparkle's own `automaticallyChecksForUpdates` runtime setting.
+    // The key is left in UserDefaults to avoid disturbing existing
+    // user prefs; it will be cleaned up in a future migration pass.
     @AppStorage("selectedHotkey") private var selectedHotkey: HotkeyOption = .fn
     @AppStorage("recordingMode") private var recordingMode: Int = 0  // 0: Hold to record, 1: Toggle
     @AppStorage("showMenuBarIcon") private var showMenuBarIcon: Bool = true
@@ -108,8 +113,14 @@ struct GeneralSettingsTab: View {
         recentLanguagesString = recents.prefix(5).joined(separator: ",")
     }
 
-    @StateObject private var updateService = UpdateService.shared
     @EnvironmentObject var licenseManager: LicenseManager
+
+    /// Current app version pulled from the bundle for display in the
+    /// Updates section header. Sparkle handles all the actual update
+    /// machinery — this is just the "you have version X" label.
+    private var currentAppVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+    }
 
     @State private var showLicenseSheet = false
     @State private var showDeactivateAlert = false
@@ -283,41 +294,26 @@ struct GeneralSettingsTab: View {
                         .padding(.top, 4)
                 }
 
-                // Updates
+                // Updates — Sparkle handles all the heavy lifting; this
+                // section is just a manual "Check for Updates" trigger
+                // and a current-version label. Background checks +
+                // download + install all happen via Sparkle per
+                // Info.plist's SUEnableAutomaticChecks /
+                // SUAutomaticallyUpdate keys.
                 SettingsSection {
                     SettingsSectionHeader(
                         icon: "arrow.down.circle", title: "Updates",
-                        subtitle: "SpeakType \(AppVersion.currentVersion)")
+                        subtitle: "SpeakType \(currentAppVersion)")
 
                     VStack(spacing: 16) {
-                        HStack {
-                            Text("Automatically check for updates")
-                                .font(Typography.bodyMedium)
-                                .foregroundStyle(Color.textPrimary)
-                            Spacer()
-                            Toggle("", isOn: $autoUpdate)
-                                .labelsHidden()
-                        }
-
                         Button(action: {
-                            Task {
-                                await updateService.checkForUpdates()
-                            }
+                            SparkleUpdater.shared.checkForUpdates()
                         }) {
                             HStack(spacing: 6) {
-                                if updateService.isCheckingForUpdates {
-                                    ProgressView()
-                                        .scaleEffect(0.7)
-                                        .frame(width: 14, height: 14)
-                                } else {
-                                    Image(systemName: "arrow.clockwise")
-                                        .font(.system(size: 12))
-                                }
-                                Text(
-                                    updateService.isCheckingForUpdates
-                                        ? "Checking..." : "Check for Updates"
-                                )
-                                .font(Typography.labelMedium)
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 12))
+                                Text("Check for Updates…")
+                                    .font(Typography.labelMedium)
                             }
                             .foregroundStyle(Color.textPrimary)
                             .frame(maxWidth: .infinity)
@@ -326,7 +322,7 @@ struct GeneralSettingsTab: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                         .buttonStyle(.plain)
-                        .disabled(updateService.isCheckingForUpdates)
+                        .disabled(!SparkleUpdater.shared.canCheckForUpdates)
                     }
                 }
 

@@ -53,22 +53,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Setup dynamic hotkey monitoring based on user selection
         setupHotkeyMonitoring()
 
-        checkForUpdatesOnLaunch()
-
         // Bring up Sparkle. It reads SUFeedURL + SUPublicEDKey from
         // Info.plist and starts scheduling background checks on its
-        // own. Coexists with the legacy UpdateService for now —
-        // follow-up work routes the manual "Check for Updates…" UI
-        // through SparkleUpdater and removes UpdateService's
-        // download/install path.
+        // own — Sparkle's standard UI handles the "update available"
+        // dialog and install-on-quit prompt. No custom update
+        // notification machinery needed.
         SparkleUpdater.shared.start()
-
-        UpdateService.shared.showUpdateWindowPublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.showUpdateWindow()
-            }
-            .store(in: &cancellables)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -305,34 +295,4 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return .fn
     }
 
-    // MARK: - Update Checking
-
-    private func checkForUpdatesOnLaunch() {
-        let updateService = UpdateService.shared
-        let autoUpdate = UserDefaults.standard.bool(forKey: "autoUpdate")
-        guard autoUpdate && updateService.shouldCheckForUpdates() else { return }
-
-        Task {
-            await updateService.checkForUpdates(silent: true)
-            if updateService.availableUpdate != nil && updateService.shouldShowReminder() {
-                await MainActor.run { self.showUpdateWindow() }
-            }
-        }
-    }
-
-    private func showUpdateWindow() {
-        guard let update = UpdateService.shared.availableUpdate else { return }
-
-        let updateSheetView = UpdateSheet(update: update)
-        let hostingController = NSHostingController(rootView: updateSheetView)
-
-        let window = NSWindow(contentViewController: hostingController)
-        window.title = "Software Update"
-        window.styleMask = [.titled, .closable]
-        window.isReleasedWhenClosed = false
-        window.center()
-        window.isMovableByWindowBackground = true
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate()
-    }
 }
