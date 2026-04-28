@@ -29,16 +29,40 @@ struct HistoryItem: Identifiable, Codable, Hashable {
 
 class HistoryService: ObservableObject {
     static let shared = HistoryService()
-    
+
     @Published var items: [HistoryItem] = []
     @Published private(set) var statsEntries: [HistoryStatsEntry] = []
-    
+
+    /// Legacy UserDefaults keys, kept for one-time migration on first
+    /// launch after upgrading from the all-UserDefaults storage layout.
     private let saveKey = "history_items"
     private let statsSaveKey = "history_stats_entries"
-    
+
+    /// File-backed store for transcription history. Replaces the
+    /// previous UserDefaults blob (which lost data on SIGKILL because
+    /// UserDefaults buffers writes). NDJSON file in Application Support.
+    private let store: HistoryStore
+
     private init() {
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        )[0].appendingPathComponent("SpeakType")
+        self.store = HistoryStore(directory: appSupport)
+
+        // Stats remain in UserDefaults for now — they're small and
+        // less critical than the transcripts themselves. The
+        // synchronize() call in saveStats() forces immediate flush,
+        // matching the durability expectation set by the file store.
         loadStats()
-        loadHistory()
+
+        // Load order: migrate from UserDefaults if needed, then read
+        // the file. Both happen in a Task so init returns promptly;
+        // SwiftUI views observing `items` will update when load
+        // completes.
+        Task { @MainActor in
+            await migrateLegacyHistoryIfNeeded()
+            await loadHistoryFromFile()
+        }
     }
     
     func addItem(transcript: String, duration: TimeInterval, audioFileURL: URL? = nil, modelUsed: String? = nil, transcriptionTime: TimeInterval? = nil) {
@@ -69,6 +93,8 @@ class HistoryService: ObservableObject {
         statsEntries.insert(statsEntry, at: 0)
         saveHistory()
         saveStats()
+        // O(1) append to the NDJSON file — no full rewrite.
+        Task { try? await store.append(newItem) }
     }
     
     func deleteItem(at offsets: IndexSet, deleteAudioFile: Bool = true) {
@@ -84,8 +110,9 @@ class HistoryService: ObservableObject {
             itemsToDelete.forEach(removeAudioFileIfNeeded(for:))
         }
         saveHistory()
+        rewriteFileSnapshot()
     }
-    
+
     func deleteItem(id: UUID, deleteAudioFile: Bool = true) {
         let itemToDelete = items.first { $0.id == id }
         items.removeAll { $0.id == id }
@@ -93,11 +120,22 @@ class HistoryService: ObservableObject {
             removeAudioFileIfNeeded(for: itemToDelete)
         }
         saveHistory()
+        rewriteFileSnapshot()
     }
-    
+
     func clearAll() {
         items.removeAll()
         saveHistory()
+        rewriteFileSnapshot()
+    }
+
+    /// Rewrite the file from the current `items` array. Used after
+    /// edits/deletes; appends use the cheaper append path.
+    /// File order is chronological (oldest first); items array is
+    /// newest first, so we reverse on the way out.
+    private func rewriteFileSnapshot() {
+        let snapshot = Array(items.reversed())
+        Task { try? await store.rewrite(snapshot) }
     }
 
     func totalWordCount() -> Int {
@@ -126,46 +164,92 @@ class HistoryService: ObservableObject {
     private func saveHistory() {
         if let encoded = try? JSONEncoder().encode(items) {
             UserDefaults.standard.set(encoded, forKey: saveKey)
+            // Force an immediate flush to disk. UserDefaults normally
+            // buffers writes and only persists on app termination or
+            // periodic flush — but `make build` / Xcode rebuild kills
+            // the running app via SIGKILL, which skips the graceful
+            // shutdown that would flush the buffer. synchronize() is
+            // formally deprecated for "normal use" but it's exactly
+            // the right tool here. Without it, a transcription saved
+            // moments before rebuild is lost.
+            UserDefaults.standard.synchronize()
         }
     }
 
     private func saveStats() {
         if let encoded = try? JSONEncoder().encode(statsEntries) {
             UserDefaults.standard.set(encoded, forKey: statsSaveKey)
+            UserDefaults.standard.synchronize()
         }
     }
     
-    private func loadHistory() {
-        if let data = UserDefaults.standard.data(forKey: saveKey),
-           let decoded = try? JSONDecoder().decode([HistoryItem].self, from: data) {
-            let normalizedItems = decoded.compactMap { item -> HistoryItem? in
-                let normalizedTranscript = WhisperService.normalizedTranscription(
-                    from: item.transcript)
-                guard !normalizedTranscript.isEmpty else { return nil }
+    /// Migrate history from the legacy UserDefaults blob to the file
+    /// store. One-time, idempotent: only runs when the file doesn't
+    /// exist yet AND there's data in the old key. Leaves the legacy
+    /// UserDefaults entry in place as a backup until manually cleared.
+    private func migrateLegacyHistoryIfNeeded() async {
+        let fileURL = await store.fileURL
+        guard !FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        guard let data = UserDefaults.standard.data(forKey: saveKey),
+            let decoded = try? JSONDecoder().decode([HistoryItem].self, from: data),
+            !decoded.isEmpty
+        else { return }
 
-                guard normalizedTranscript != item.transcript else { return item }
-
-                return HistoryItem(
-                    id: item.id,
-                    date: item.date,
-                    transcript: normalizedTranscript,
-                    duration: item.duration,
-                    audioFileURL: item.audioFileURL,
-                    modelUsed: item.modelUsed,
-                    transcriptionTime: item.transcriptionTime
-                )
-            }
-
-            items = normalizedItems
-
-            if normalizedItems.count != decoded.count
-                || zip(decoded, normalizedItems).contains(where: { $0.transcript != $1.transcript })
-            {
-                saveHistory()
-            }
-
-            migrateStatsIfNeeded(from: normalizedItems)
+        // Legacy data was stored newest-first (insert at 0). The file
+        // expects chronological order, so reverse before writing.
+        let chronological = Array(decoded.reversed())
+        do {
+            try await store.rewrite(chronological)
+            print("ℹ️ Migrated \(chronological.count) history items from UserDefaults → file store")
+        } catch {
+            print("⚠️ History migration failed: \(error)")
         }
+    }
+
+    /// Load all items from the NDJSON file into the published `items`
+    /// array, applying transcript-normalization (catches old entries
+    /// that pre-date the hallucination filter being added).
+    @MainActor
+    private func loadHistoryFromFile() async {
+        let chronological: [HistoryItem]
+        do {
+            chronological = try await store.loadAll()
+        } catch {
+            print("⚠️ History load failed: \(error)")
+            return
+        }
+
+        // Apply normalization once at load — any entries written before
+        // we added the hallucination filter get cleaned up here. Items
+        // whose normalized form is empty are dropped.
+        let normalized = chronological.compactMap { item -> HistoryItem? in
+            let cleaned = WhisperService.normalizedTranscription(from: item.transcript)
+            guard !cleaned.isEmpty else { return nil }
+            if cleaned == item.transcript { return item }
+            return HistoryItem(
+                id: item.id,
+                date: item.date,
+                transcript: cleaned,
+                duration: item.duration,
+                audioFileURL: item.audioFileURL,
+                modelUsed: item.modelUsed,
+                transcriptionTime: item.transcriptionTime
+            )
+        }
+
+        // Items array is newest-first; file is oldest-first. Reverse.
+        items = Array(normalized.reversed())
+
+        // If normalization dropped or rewrote anything, persist the
+        // cleaned snapshot back to the file so we don't repeat the
+        // work next launch.
+        if normalized.count != chronological.count
+            || zip(chronological, normalized).contains(where: { $0.transcript != $1.transcript })
+        {
+            Task { try? await store.rewrite(normalized) }
+        }
+
+        migrateStatsIfNeeded(from: normalized)
     }
 
     private func loadStats() {
